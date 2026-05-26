@@ -1,0 +1,16 @@
+# colcon
+build/
+install/
+log/
+
+# python
+__pycache__/
+*.pyc
+*.egg-info/
+
+# ros_bag
+bag_files/
+
+# claude
+CLAUDE.md
+.claude/
