@@ -57,5 +57,7 @@ RUN echo "source /opt/ros/jazzy/setup.bash" >> ~/.bashrc && \
     echo "source /usr/share/colcon_cd/function/colcon_cd.sh" >> ~/.bashrc && \
     echo "export _colcon_cd_root=~/robos_moveis" >> ~/.bashrc && \
     echo "alias cbuild='colcon build --symlink-install'" >> ~/.bashrc && \
+    echo '# Auto-detect host X display from mounted socket so DISPLAY survives host-session changes' >> ~/.bashrc && \
+    echo 'for s in /tmp/.X11-unix/X*; do [ -S "$s" ] && export DISPLAY=":${s##*/X}" && break; done' >> ~/.bashrc && \
     touch ~/.sudo_as_admin_successful
 

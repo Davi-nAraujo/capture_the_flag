@@ -3,8 +3,8 @@
 <package format="3">
   <name>capture_the_flag</name>
   <version>0.0.0</version>
-  <!-- <description>Pacote da disciplina SSC0712: Programação de Robôs Móveis</description>
-  <maintainer email="matheus.m.santos@icmc.usp.br">machado</maintainer> -->
+  <description>Pacote da disciplina SSC0712: Programação de Robôs Móveis</description>
+  <maintainer email="davi_araujo@usp.br">Davi</maintainer>
   <license>Apache-2.0</license>
 
   <test_depend>ament_copyright</test_depend>

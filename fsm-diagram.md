@@ -6,7 +6,7 @@ config:
 stateDiagram-v2
 
     IDLE : publishes cmd_vel = 0. waiting for command. Reads - start_button topic
-
+    
     EXPLORING : publishes /cmd_vel with linear.x constant. Periodically samples a new random angular.z every 10 seconds. Reads - /scan and /camera
 
     OBSTACLE_AVOIDANCE : if LIDAR detects an obstacle within 0.5 meters in the forward arc, Publishes /cmd_vel with low linear.x, angular.z toward the freest LIDAR sector. Exits to previous_state when the forward arc is clear of obstacles within 0.5 meters. Reads - /scan and previous_state

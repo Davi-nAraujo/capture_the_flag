@@ -60,7 +60,7 @@ setup(
         'console_scripts': [
             'tartaruga = capture_the_flag.controle_tartaruga:main',
             'ground_truth_odometry = capture_the_flag.ground_truth_odometry:main',
-            'controle_robo = capture_the_flag.controle_robo:main',
+            'mission_fsm = capture_the_flag.mission_fsm:main',
             'robo_mapper = capture_the_flag.robo_mapper:main'
         ],
     },
