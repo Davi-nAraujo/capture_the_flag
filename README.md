@@ -7,6 +7,8 @@ Robô diferencial autônomo que **explora uma arena, detecta uma bandeira por vi
 computacional (câmera de segmentação semântica) e se posiciona para capturá-la**, com
 controle baseado em **máquina de estados (FSM)** e desvio de obstáculos por LIDAR.
 
+Link para os slides: https://docs.google.com/presentation/u/0/d/1Btu7tvaXl8BQucPhcyZa-rEQ95vv61s9dBTqny8FILs/mobilepresent
+
 > Pacote renomeado de `prm_2026` para **`capture_the_flag`** (requisito do trabalho).
 
 ---
