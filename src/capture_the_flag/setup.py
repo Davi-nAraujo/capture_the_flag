@@ -51,9 +51,9 @@ setup(
     data_files=data_files,
     install_requires=['setuptools'],
     zip_safe=True,
-    # maintainer='Matheus Machado',
-    # maintainer_email='matheus.m.santos@icmc.usp.br',
-    # description='Pacote da disciplina SSC0712: Programação de Robôs Móveis',
+    maintainer='Davi',
+    maintainer_email='davi_araujo@usp.br',
+    description='SSC0712 Trabalho 1 — robô autônomo de exploração e captura de bandeira (FSM).',
     license='Apache-2.0',
     tests_require=['pytest'],
     entry_points={
