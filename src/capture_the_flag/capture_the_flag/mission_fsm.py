@@ -3,14 +3,16 @@ import rclpy
 from rclpy.node import Node
 
 from sensor_msgs.msg import LaserScan, Imu, Image
-from nav_msgs.msg import Odometry
-from geometry_msgs.msg import TwistStamped
+from nav_msgs.msg import Odometry, OccupancyGrid, Path
+from geometry_msgs.msg import TwistStamped, PoseStamped
 
 
 from cv_bridge import CvBridge
 import cv2
 import numpy as np
+from scipy import ndimage
 import math
+import heapq
 from enum import Enum
 class MissionFSM(Node):
 
@@ -207,6 +209,13 @@ class MissionFSM(Node):
     # o controlador go-to-point já validado no GOING_TO_FLAG (mesma camada de desvio).
     SEARCH_FORWARD = 15.0        # m em +x a partir do spawn → alvo ~x=+7 (centro da zona azul)
     SEARCH_REACHED_DIST = 1.0    # m: "chegou ao waypoint de busca" (gatilho do fallback)
+
+    # --- Planejamento GLOBAL (mapa de ocupação /grid_map + A*) [Trab. 2] ---
+    # O desvio reativo trava em PAREDES (mínimo local); o A* enxerga o mapa inteiro e
+    # acha o caminho pela porta. Desconhecido = LIVRE (otimismo) + replanejamento → o
+    # robô avança, descobre as paredes pelo LIDAR e desvia recalculando o caminho.
+    INFLATION_M = 0.25           # m: infla obstáculos pelo raio do corpo (~0.16) + margem
+    REPLAN_PERIOD = 0.5          # s: replaneja ~2x/s contra o mapa que vai crescendo
 
     # --- Navegação por META no frame odom (go-to-point) ---
     # Ideia: ao confirmar a bandeira, congela um PONTO no frame odom e navega até ele.
@@ -593,6 +602,165 @@ class MissionFSM(Node):
 
     # RETURNING_HOME não tem transição: é estado FINAL (missão concluída, robô parado).
 
+    # ============================================================
+    # Planejamento GLOBAL: mapa de ocupação (/grid_map) + A*  [Trab. 2]
+    # ============================================================
+
+    def grid_callback(self, msg: OccupancyGrid):
+        # Guarda o mapa de ocupação (numpy) + metadados. Inflação e A* rodam no
+        # replanejamento (não aqui), p/ não pesar no callback assíncrono.
+        info = msg.info
+        self.map_info = (info.resolution, info.origin.position.x,
+                         info.origin.position.y, info.width, info.height)
+        self.occ_grid = np.array(msg.data, dtype=np.int8).reshape(info.height, info.width)
+
+    def _world_to_cell(self, x, y):
+        res, ox, oy, W, H = self.map_info
+        return int((x - ox) / res), int((y - oy) / res)
+
+    def _cell_to_world(self, gx, gy):
+        res, ox, oy, W, H = self.map_info
+        return (ox + (gx + 0.5) * res, oy + (gy + 0.5) * res)
+
+    @staticmethod
+    def _disk(radius_cells):
+        # Elemento estruturante circular p/ a inflação (footprint do robô).
+        r = radius_cells
+        y, x = np.ogrid[-r:r + 1, -r:r + 1]
+        return (x * x + y * y) <= r * r
+
+    def _compute_blocked(self):
+        # Células OCUPADAS (==100) infladas pelo raio do robô. Livre(0) e
+        # DESCONHECIDO(-1) contam como livres (otimismo → avança e descobre).
+        occ = (self.occ_grid == 100)
+        res = self.map_info[0]
+        rad = max(1, int(math.ceil(self.INFLATION_M / res)))
+        return ndimage.binary_dilation(occ, structure=self._disk(rad))
+
+    @staticmethod
+    def _astar(blocked, start, goal):
+        # A* 8-conexo, heurística euclidiana (admissível p/ 8 vizinhos → ótimo).
+        # blocked: array (H,W) booleano. start/goal: (gx, gy). Devolve [(gx,gy),...]
+        # do start ao goal, ou None se não há caminho.
+        H, W = blocked.shape
+        sx, sy = start
+        gx, gy = goal
+
+        def h(x, y):
+            return math.hypot(x - gx, y - gy)
+
+        SQ2 = math.sqrt(2.0)
+        nbrs = ((-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
+                (-1, -1, SQ2), (-1, 1, SQ2), (1, -1, SQ2), (1, 1, SQ2))
+        openh = [(h(sx, sy), 0.0, sx, sy)]
+        came = {}
+        gscore = {(sx, sy): 0.0}
+        closed = set()
+        while openh:
+            f, g, x, y = heapq.heappop(openh)
+            if (x, y) in closed:
+                continue
+            if (x, y) == (gx, gy):
+                path = [(x, y)]
+                while (x, y) in came:
+                    x, y = came[(x, y)]
+                    path.append((x, y))
+                return path[::-1]
+            closed.add((x, y))
+            for dx, dy, cost in nbrs:
+                nx, ny = x + dx, y + dy
+                if nx < 0 or nx >= W or ny < 0 or ny >= H or blocked[ny, nx]:
+                    continue
+                ng = g + cost
+                if ng < gscore.get((nx, ny), float('inf')):
+                    gscore[(nx, ny)] = ng
+                    came[(nx, ny)] = (x, y)
+                    heapq.heappush(openh, (ng + h(nx, ny), ng, nx, ny))
+        return None
+
+    @staticmethod
+    def _nearest_free(blocked, cell, max_r=25):
+        # Se a célula (robô ou meta) caiu DENTRO da inflação, acha a célula livre
+        # mais próxima em anéis crescentes — senão o A* falharia por start/goal inválido.
+        H, W = blocked.shape
+        cx, cy = cell
+        if 0 <= cx < W and 0 <= cy < H and not blocked[cy, cx]:
+            return (cx, cy)
+        for r in range(1, max_r + 1):
+            for dx in range(-r, r + 1):
+                for dy in (-r, r):
+                    x, y = cx + dx, cy + dy
+                    if 0 <= x < W and 0 <= y < H and not blocked[y, x]:
+                        return (x, y)
+            for dy in range(-r + 1, r):
+                for dx in (-r, r):
+                    x, y = cx + dx, cy + dy
+                    if 0 <= x < W and 0 <= y < H and not blocked[y, x]:
+                        return (x, y)
+        return None
+
+    def _simplify_path(self, cells):
+        # Colapsa células colineares: mantém só os pontos onde a DIREÇÃO muda
+        # (A* anda em passos unitários, então direção igual = mesmo segmento reto).
+        if len(cells) < 3:
+            return [self._cell_to_world(*c) for c in cells]
+        out = [cells[0]]
+        for i in range(1, len(cells) - 1):
+            ax, ay = cells[i - 1]
+            bx, by = cells[i]
+            cx, cy = cells[i + 1]
+            if (bx - ax, by - ay) != (cx - bx, cy - by):
+                out.append(cells[i])
+        out.append(cells[-1])
+        return [self._cell_to_world(*c) for c in out]
+
+    def _plan_goal(self):
+        # Meta do planejador: a bandeira (se já estimada) senão o waypoint da zona azul.
+        if self.flag_goal is not None:
+            return self.flag_goal
+        return self.search_goal
+
+    def _replan(self):
+        # Recalcula o caminho global robô→meta e publica /plan (RViz). Guarda
+        # self.path (lista de (x,y) no mundo) p/ o seguidor de caminho (Etapa 3).
+        if self.occ_grid is None or self.pose is None:
+            return
+        goal = self._plan_goal()
+        if goal is None:
+            return
+        blocked = self._compute_blocked()
+        start = self._nearest_free(blocked, self._world_to_cell(self.pose[0], self.pose[1]))
+        if start is not None:
+            blocked[start[1], start[0]] = False  # nunca bloqueia a célula do próprio robô
+        gcell = self._nearest_free(blocked, self._world_to_cell(goal[0], goal[1]))
+        if start is None or gcell is None:
+            self.path = []
+            self._publish_plan([])
+            return
+        cells = self._astar(blocked, start, gcell)
+        self.path = self._simplify_path(cells) if cells else []
+        self._publish_plan(self.path)
+
+    def _maybe_replan(self):
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if now - self.last_replan < self.REPLAN_PERIOD:
+            return
+        self.last_replan = now
+        self._replan()
+
+    def _publish_plan(self, waypoints):
+        path = Path()
+        path.header.frame_id = "map"
+        path.header.stamp = self.get_clock().now().to_msg()
+        for (wx, wy) in waypoints:
+            ps = PoseStamped()
+            ps.header.frame_id = "map"
+            ps.pose.position.x = float(wx)
+            ps.pose.position.y = float(wy)
+            ps.pose.orientation.w = 1.0
+            path.poses.append(ps)
+        self.plan_pub.publish(path)
+
     def __init__(self):
         super().__init__('mission_fsm')
 
@@ -643,15 +811,23 @@ class MissionFSM(Node):
         self.flag_goal = None               # (x, y) estimado da bandeira no frame odom
         self.start_pose = None              # pose de spawn registrada (1ª msg de odom)
         self.search_goal = None             # (x, y) waypoint da busca dirigida (zona azul)
+        # Planejamento global (Trab. 2): mapa de ocupação + caminho A*.
+        self.occ_grid = None                # numpy (H,W) do /grid_map; None até 1ª msg
+        self.map_info = None                # (res, ox, oy, W, H) do /grid_map
+        self.path = []                      # caminho A* atual: lista de (x, y) no mundo
+        self.last_replan = 0.0              # relógio do replanejamento (s)
 
         # Publisher para comando de velocidade
         self.cmd_vel_pub = self.create_publisher(TwistStamped, '/diff_drive_base_controller/cmd_vel', 10)
+        # Publisher do caminho planejado (A*) para visualização no RViz
+        self.plan_pub = self.create_publisher(Path, '/plan', 10)
 
         # Subscribers
         self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
         self.create_subscription(Imu, '/imu', self.imu_callback, 10)
         self.create_subscription(Odometry, '/odom_gt', self.odom_callback, 10)
         self.create_subscription(Image, '/robot_cam/labels_map', self.camera_callback, 10)
+        self.create_subscription(OccupancyGrid, '/grid_map', self.grid_callback, 10)
 
         # Utilizado para converter imagens ROS -> OpenCV
         self.bridge = CvBridge()
@@ -753,6 +929,10 @@ class MissionFSM(Node):
 
         # FASE 2 — despacho de comportamento: roda o estado em que estamos agora.
         self.behaviors[self.current_state]()
+
+        # Planejamento global (Etapa 2): recalcula + publica /plan ~2x/s. Por ora só
+        # PUBLICA o caminho (RViz); seguir o caminho é a Etapa 3.
+        self._maybe_replan()
 
 def main(args=None):
     rclpy.init(args=args)
