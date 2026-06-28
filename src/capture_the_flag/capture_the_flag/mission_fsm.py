@@ -38,13 +38,20 @@ class MissionFSM(Node):
 
 
     def behavior_exploring(self):
-        self._publish_cmd(0.3, 0.0)
+        # Busca DIRIGIDA: navega para o waypoint na zona azul (onde a bandeira fixa
+        # está), reusando o controlador go-to-point. Enquanto a 1ª msg de odom não
+        # chega (sem pose/waypoint), cai para o avanço reto antigo — sem regressão.
+        if self.pose is None or self.search_goal is None:
+            self._publish_cmd(0.3, 0.0)
+            return
+        self._drive_to_point(*self.search_goal)
 
 
     def behavior_obstacle_avoidance(self):
-        # Desvio em DUAS fases para escapar de mínimo local (obstáculo entre robô e
-        # meta): (1) TURN gira no lugar para o lado livre; (2) ESCAPE anda PARA FRENTE
-        # nessa direção livre, deslocando-se LATERALMENTE ao redor do obstáculo.
+        # Desvio em TRÊS fases para escapar de mínimo local (obstáculo entre robô e
+        # meta): (1) BACKUP dá ré se a frente está perto demais para girar com o braço
+        # sem raspar; (2) TURN gira no lugar para o lado escolhido; (3) ESCAPE anda PARA
+        # FRENTE nessa direção, deslocando-se LATERALMENTE ao redor do obstáculo.
         if self.avoid_phase == 'BACKUP':   # dá ré p/ afastar o braço antes de girar
             self._publish_cmd(-self.AVOID_BACK, 0.0)
         elif self.avoid_phase == 'TURN':
@@ -52,7 +59,7 @@ class MissionFSM(Node):
         else:  # ESCAPE: anda em ARCO, curvando de volta ao lado do obstáculo (contorna).
             self._publish_cmd(self.ESCAPE_FWD, -self.avoid_turn_dir * self.ESCAPE_CURVE)
 
-        
+
     def behavior_flag_found_confirmation(self):
         self._publish_cmd(0.0, 0.0)
 
@@ -72,9 +79,16 @@ class MissionFSM(Node):
 
 
     def behavior_refinding_flag(self):
-        # Gira no lugar para o lado onde a bandeira foi vista por último.
-        # err<0 (esquerda) → CCW(+); err>0 (direita) → CW(-).
-        sign = 1.0 if self.last_flag_err <= 0 else -1.0
+        # Gira no lugar para o lado onde a bandeira deve estar. Melhor estimativa de
+        # direção = a META LEMBRADA no frame odom (_flag_side: +1 esq / -1 dir), que
+        # vale qualquer que tenha sido o caminho de entrada no REFINDING. Sem meta/pose
+        # (ou bandeira ~à frente), cai para o último erro de pixel visto (last_flag_err):
+        # err<=0 (esquerda) → CCW(+); err>0 (direita) → CW(-).
+        side = self._flag_side()
+        if side is not None:
+            sign = side
+        else:
+            sign = 1.0 if self.last_flag_err <= 0 else -1.0
         self._publish_cmd(0.0, self.REFIND_ANGULAR * sign)
 
 
@@ -87,8 +101,7 @@ class MissionFSM(Node):
             self._publish_cmd(0.0, 0.0)  # sem alvo; a transição manda p/ REFINDING
             return
         cx, _ = centroid
-        half = self.image_width / 2.0
-        err = (cx - half) / half               # ∈ [-1, +1]; + = bandeira à direita
+        err = self._flag_bearing_error(cx)     # ∈ [-1, +1]; + = bandeira à direita
         self.last_flag_err = err               # mantém o lado p/ REFINDING girar certo
         angular = -self.KP_BEARING * err       # gira para zerar o erro de bearing
         self._publish_cmd(0.0, angular)
@@ -123,13 +136,13 @@ class MissionFSM(Node):
     # folga real na ponta do braço = r − 0.40. Para parar com ~0.15 m de margem na
     # ponta + reação, disparamos quando r ≤ ~0.40 (braço) + 0.15 + reação ≈ 0.65 m.
     FRONT_BLOCK_DIST = 0.7                # m (medido da origem do LIDAR, não da ponta)
-    # Limiar de PERIGO (< FRONT_BLOCK_DIST): se algo está a menos que isto na frente,
-    # nem a bandeira interrompe o desvio — a segurança vence. Acima dele (mas ainda
-    # "bloqueado"), uma bandeira avistada durante o giro PODE travar a perseguição.
-    # ~0.5 m do LIDAR = ~0.1 m da ponta do braço: imine, não vire para o alvo agora.
+    # Limiar de PERIGO (< FRONT_BLOCK_DIST): mais apertado que "bloqueado". Usado na
+    # fase ESCAPE: se durante o escape algo volta a ficar perigosamente perto à frente,
+    # NÃO gira no lugar (o braço raspa) — interrompe e volta para BACKUP/ré primeiro.
+    # ~0.5 m do LIDAR = ~0.1 m da ponta do braço: iminente.
     DANGER_DIST = 0.5                     # m
 
-    # OBSTACLE_AVOIDANCE — desvio COMPROMETIDO (anti-chatter), Lever 2:
+    # OBSTACLE_AVOIDANCE — desvio COMPROMETIDO (anti-chatter), camada 2 (subsumption):
     AVOID_ANGULAR = 0.5                   # rad/s do giro (sentido escolhido na entrada)
     # Histerese (Schmitt): ENTRA o desvio em FRONT_BLOCK_DIST (0.7), mas só SAI quando
     # a frente está livre por uma margem MAIOR. Limiares iguais = vibração na fronteira.
@@ -174,13 +187,26 @@ class MissionFSM(Node):
     KP_BEARING = 0.3       # ganho proporcional do erro horizontal (ADJUSTING)
     CENTER_TOL = 0.15      # |erro| abaixo disto = bandeira "centralizada"
     AREA_MIN = 10          # px²: blob menor que isto = ruído/longe demais → ignora
-    AREA_NEAR = 3500       # px²: blob ≥ isto = perto o bastante p/ "chegou". Arrival
+    AREA_NEAR = 1500       # px²: blob ≥ isto = perto o bastante p/ "chegou". Arrival
                            # VISUAL (a bandeira pode não estar no plano do LIDAR). TUNAR.
     FLAG_LABEL = 25        # blue_flag no labels_map (segmentação semântica)
 
     # REFINDING_FLAG — gira para reencontrar a bandeira perdida de vista.
     REFIND_ANGULAR = 0.5         # rad/s do giro de busca
     REFIND_TIMEOUT_TICKS = 120   # ~12 s (≈ uma volta) sem achar → desiste p/ EXPLORING
+
+    # --- Busca DIRIGIDA (EXPLORING) ---
+    # Em vez de andar reto às cegas, navega para um WAYPOINT no frame odom dentro da
+    # zona azul (+x), onde a bandeira FIXA fica em TODOS os mapas (zona vermelha sempre
+    # em -x → robô spawna lá; blue flag sempre em +x, na linha de centro y≈0). A bandeira
+    # é avistada de relance a caminho (FOV ~90°) e dispara FLAG_FOUND_CONFIRMATION ANTES
+    # de chegar ao waypoint — então o waypoint é, na prática, só uma DIREÇÃO. Alvo
+    # derivado da POSE DE SPAWN (+x), não de coordenada fixa → agnóstico ao mapa. Só se
+    # CHEGAR ao waypoint sem avistar a bandeira (oclusão, ex. arena_paredes) cai p/ busca
+    # giratória (REFINDING), evitando estacionar parado (penalidade "robô parado"). Reusa
+    # o controlador go-to-point já validado no GOING_TO_FLAG (mesma camada de desvio).
+    SEARCH_FORWARD = 15.0        # m em +x a partir do spawn → alvo ~x=+7 (centro da zona azul)
+    SEARCH_REACHED_DIST = 1.0    # m: "chegou ao waypoint de busca" (gatilho do fallback)
 
     # --- Navegação por META no frame odom (go-to-point) ---
     # Ideia: ao confirmar a bandeira, congela um PONTO no frame odom e navega até ele.
@@ -193,6 +219,28 @@ class MissionFSM(Node):
     GOAL_V_MAX = 0.35           # m/s máx à frente
     GOAL_W_MAX = 1.0            # rad/s máx de giro
     GOAL_ALIGN_TOL = 0.6        # rad: |bearing| acima disto → só gira, não avança
+    # Anti-deadlock: chegada é VISUAL (AREA_NEAR). Mas se perdemos o pixel e ainda
+    # assim alcançamos a meta lembrada, o robô estacionaria sem nunca "chegar". Quando
+    # isso acontece, vai REFINDING (gira p/ reaver) em vez de travar parado.
+    GOAL_REACHED_DIST = 0.5     # m: "alcançou a meta lembrada" (sem a bandeira à vista)
+
+    # --- Guarda de PROXIMIDADE LATERAL (camada reativa em GOING_TO_FLAG) ---
+    # O cone frontal (±25°) NÃO enxerga cilindros que passam rente ao FLANCO/braço —
+    # por isso o robô às vezes raspa o lado durante a perseguição. Esta camada lê uma
+    # faixa "near-front" de cada lado e, como um CAMPO POTENCIAL, empurra o comando
+    # para LONGE do lado próximo + freia, SEM trocar de estado (a meta lembrada
+    # flag_goal segue valendo, então perder o pixel um instante não custa nada).
+    SIDE_NEAR_LO_DEG = 25.0     # início da faixa lateral (logo após o cone frontal)
+    SIDE_NEAR_HI_DEG = 110.0    # fim da faixa: cobre rodas/flanco e um pouco atrás deles
+    # FADE do limiar com o ÂNGULO (= footprint inflado): perto da frente exigimos MAIS
+    # espaço (estamos transladando para lá); perto de 90° o feixe aponta para o FLANCO/
+    # roda, onde o corpo já ocupa quase toda a folga → limiar CAI. clear(θ) interpola
+    # linearmente de _FRONT (em LO) até _SIDE (em HI).
+    SIDE_CLEAR_FRONT = 0.55     # m: folga exigida na borda dianteira da faixa (25°)
+    SIDE_CLEAR_SIDE = 0.22      # m: folga exigida no flanco (~110°) ≈ meia-largura+margem
+    SIDE_BAND = 0.20            # m: largura da rampa (clear→repulsão máx) em cada feixe
+    SIDE_KP_ANG = 0.9           # rad/s de empurrão angular na repulsão máxima
+    SIDE_BRAKE = 0.6            # fração máx. de freio linear na repulsão máxima
 
     def _front_min_dist(self) -> float:
         # Menor distância válida no arco frontal (±FRONT_ARC_HALF). Fonte única de
@@ -243,6 +291,38 @@ class MissionFSM(Node):
         left = sector_clearance(range(lo, hi + 1))           # CCW da frente = esquerda
         right = sector_clearance(range(n - hi, n - lo + 1))  # CW da frente = direita
         return left, right
+
+    def _side_repulsion(self):
+        # Repulsão lateral com folga DEPENDENTE DO ÂNGULO (footprint inflado). Para cada
+        # feixe no arco [LO, HI] de cada lado: se o range cai abaixo do clear(θ) daquele
+        # ângulo, gera força ∈ (0,1] que cresce até 1 dentro de SIDE_BAND. Retorna a MAIOR
+        # força de cada lado: (s_esq, s_dir). Sem scan → sem repulsão.
+        scan = self.latest_scan
+        if scan is None:
+            return 0.0, 0.0
+        inc = scan.angle_increment
+        n = len(scan.ranges)
+        lo = math.radians(self.SIDE_NEAR_LO_DEG)
+        hi = math.radians(self.SIDE_NEAR_HI_DEG)
+        span_ang = hi - lo
+
+        def strength_at(r: float, theta: float) -> float:
+            if math.isnan(r) or math.isinf(r) or r < scan.range_min:
+                return 0.0  # inf/inválido = livre
+            t = (theta - lo) / span_ang                      # 0 na frente → 1 no flanco
+            clear = self.SIDE_CLEAR_FRONT + t * (self.SIDE_CLEAR_SIDE - self.SIDE_CLEAR_FRONT)
+            if r >= clear:
+                return 0.0
+            return min(1.0, (clear - r) / self.SIDE_BAND)    # rampa: 0→1 conforme aproxima
+
+        i_lo = int(round(lo / inc))
+        i_hi = int(round(hi / inc))
+        s_left = s_right = 0.0
+        for i in range(i_lo, i_hi + 1):
+            theta = i * inc
+            s_left = max(s_left, strength_at(scan.ranges[i % n], theta))      # CCW = esq
+            s_right = max(s_right, strength_at(scan.ranges[(-i) % n], theta))  # CW = dir
+        return s_left, s_right
 
     def _freest_turn_dir(self) -> float:
         # +1 = esquerda (CCW), -1 = direita (CW): vira para o lado MAIS LIVRE.
@@ -302,19 +382,19 @@ class MissionFSM(Node):
         x, y, _ = self.pose
         return math.hypot(gx - x, gy - y)
 
-    def _range_at_bearing(self, bearing: float):
-        # Lê o LIDAR no ângulo 'bearing' → (range, is_metric). Se o feixe não retorna
-        # nada válido (bandeira além de range_max), devolve DEFAULT_FLAG_RANGE com
-        # is_metric=False (só direção; refina ao entrar no alcance do LIDAR).
+    def _range_at_bearing(self, bearing: float) -> float:
+        # Lê o LIDAR no ângulo 'bearing' → range. Se o feixe não retorna nada válido
+        # (bandeira além de range_max), devolve DEFAULT_FLAG_RANGE — só dá DIREÇÃO; a
+        # distância se refina sozinha quando a bandeira entra no alcance do LIDAR.
         scan = self.latest_scan
         if scan is None:
-            return self.DEFAULT_FLAG_RANGE, False
+            return self.DEFAULT_FLAG_RANGE
         n = len(scan.ranges)
         idx = int(round(bearing / scan.angle_increment)) % n
         r = scan.ranges[idx]
         if math.isnan(r) or math.isinf(r) or r < scan.range_min or r > scan.range_max:
-            return self.DEFAULT_FLAG_RANGE, False
-        return r, True
+            return self.DEFAULT_FLAG_RANGE
+        return r
 
     def _update_flag_goal(self, cx: float):
         # Projeta o centroide da bandeira no frame odom → ponto-meta (a MEMÓRIA).
@@ -322,13 +402,11 @@ class MissionFSM(Node):
         if self.pose is None or self.image_width is None:
             return
         x, y, yaw = self.pose
-        half = self.image_width / 2.0
-        err = (cx - half) / half                  # + = bandeira à direita
+        err = self._flag_bearing_error(cx)        # + = bandeira à direita
         bearing = -err * (self.CAM_HFOV / 2.0)    # à direita = bearing negativo (CW)
-        rng, metric = self._range_at_bearing(bearing)
+        rng = self._range_at_bearing(bearing)
         self.flag_goal = (x + rng * math.cos(yaw + bearing),
                           y + rng * math.sin(yaw + bearing))
-        self.flag_goal_metric = metric
 
     def _drive_to_point(self, gx: float, gy: float) -> float:
         # Controlador uniciclo: gira para o alvo e avança proporcional à distância,
@@ -339,20 +417,36 @@ class MissionFSM(Node):
         x, y, yaw = self.pose
         dist = math.hypot(gx - x, gy - y)
         berr = self._norm_angle(math.atan2(gy - y, gx - x) - yaw)
-        ang = max(-self.GOAL_W_MAX, min(self.GOAL_W_MAX, self.GOAL_KP_ANG * berr))
+        ang = self.GOAL_KP_ANG * berr
         lin = self.GOAL_KP_LIN * dist
         lin *= max(0.0, 1.0 - abs(berr) / self.GOAL_ALIGN_TOL)  # só avança alinhado
+
+        # --- Camada reativa: repulsão LATERAL (campo potencial, footprint inflado) ---
+        # O cone frontal (±25°) não vê cilindros rente ao flanco/roda. Aqui empurramos
+        # para LONGE do lado próximo e freamos, proporcional à força (max dos feixes).
+        # Não troca de estado: a meta lembrada (flag_goal) segue valendo.
+        s_left, s_right = self._side_repulsion()
+        ang += self.SIDE_KP_ANG * (s_right - s_left)   # +ang=CCW: foge da esquerda → −
+        lin *= 1.0 - self.SIDE_BRAKE * max(s_left, s_right)
+
+        ang = max(-self.GOAL_W_MAX, min(self.GOAL_W_MAX, ang))
         lin = max(0.0, min(self.GOAL_V_MAX, lin))
         self._publish_cmd(lin, ang)
         return dist
+
+    def _flag_bearing_error(self, cx: float) -> float:
+        # Erro horizontal normalizado do centroide: 0 = centro, +1 = borda direita,
+        # -1 = borda esquerda. Fonte única da conversão pixel→bearing (usado pelo
+        # ADJUSTING, pelo _flag_centered e pela projeção da meta em _update_flag_goal).
+        half = self.image_width / 2.0
+        return (cx - half) / half
 
     def _flag_centered(self) -> bool:
         centroid = self.latest_flag_centroid
         if centroid is None or self.image_width is None:
             return False
         cx, _ = centroid
-        half = self.image_width / 2.0
-        return abs((cx - half) / half) < self.CENTER_TOL
+        return abs(self._flag_bearing_error(cx)) < self.CENTER_TOL
 
     # --- Transições (Fase 1): retornam o próximo State, ou None para "permanecer" ---
 
@@ -372,7 +466,13 @@ class MissionFSM(Node):
         if self.latest_flag_centroid is not None:
             self.flag_seen_consecutive = 0  # zera o contador ao ENTRAR na confirmação
             return self.States.FLAG_FOUND_CONFIRMATION
-        # 3) Nada de interessante: continua explorando.
+        # 3) Chegou ao waypoint de busca SEM avistar a bandeira (oclusão/raro): gira no
+        #    lugar p/ varrer a zona (REFINDING), em vez de estacionar parado no waypoint.
+        if (self.pose is not None and self.search_goal is not None
+                and self._dist_to(*self.search_goal) < self.SEARCH_REACHED_DIST):
+            self.refind_ticks = 0
+            return self.States.REFINDING_FLAG
+        # 4) Nada de interessante: segue a busca dirigida rumo ao waypoint.
         return None
 
     def transition_obstacle_avoidance(self):
@@ -445,7 +545,13 @@ class MissionFSM(Node):
         # 3) Obstáculo à frente? Desvia (override). Ao voltar, a meta segue lembrada.
         if self._front_blocked():
             return self._enter_avoidance()
-        # 4) Segue navegando para a meta.
+        # 4) Anti-deadlock: alcançamos a meta lembrada mas SEM a bandeira à vista
+        #    (perdemos o pixel perto do ponto). Não fica estacionado: gira p/ reaver.
+        if (self.latest_flag_centroid is None and self.pose is not None
+                and self._dist_to(*self.flag_goal) < self.GOAL_REACHED_DIST):
+            self.refind_ticks = 0
+            return self.States.REFINDING_FLAG
+        # 5) Segue navegando para a meta.
         return None
 
     def transition_refinding_flag(self):
@@ -483,7 +589,7 @@ class MissionFSM(Node):
             self.get_logger().info(
                 "BANDEIRA COLETADA! Missao cumprida. -> RETURNING_HOME")
             return self.States.RETURNING_HOME
-        return None  # ainda coletando: fica parada
+        return None
 
     # RETURNING_HOME não tem transição: é estado FINAL (missão concluída, robô parado).
 
@@ -535,7 +641,8 @@ class MissionFSM(Node):
         self.escape_ticks = 0               # ticks andando na fase ESCAPE
         self.pose = None                    # (x, y, yaw) no frame odom_gt; None até 1ª msg
         self.flag_goal = None               # (x, y) estimado da bandeira no frame odom
-        self.flag_goal_metric = False       # True se a meta veio de range REAL do LIDAR
+        self.start_pose = None              # pose de spawn registrada (1ª msg de odom)
+        self.search_goal = None             # (x, y) waypoint da busca dirigida (zona azul)
 
         # Publisher para comando de velocidade
         self.cmd_vel_pub = self.create_publisher(TwistStamped, '/diff_drive_base_controller/cmd_vel', 10)
@@ -552,56 +659,15 @@ class MissionFSM(Node):
         # Timer para enviar comandos continuamente
         self.timer = self.create_timer(0.1, self.tick)
 
-        # Estado interno
-        # self.obstaculo_a_frente = False
-
     def scan_callback(self, msg: LaserScan):
+        # Callback assíncrono: só guarda a última varredura. Toda a decisão
+        # (bloqueio/perigo/repulsão) acontece no tick(), lendo self.latest_scan.
         self.latest_scan = msg
-        # # Verifica uma faixa estreita ao redor de 0° (frente)
-        # num_ranges = len(msg.ranges)
-        # if num_ranges == 0:
-        #     return
-
-        # # Índices de -30° a +30° (equivalente a 330 até 30)
-        # indices_frente = list(range(330, 360)) + list(range(0, 31))
-
-        # # Filtra distancias
-        # distancias = [msg.ranges[i] for i in indices_frente]
-
-        # if distancias and min(distancias) < 0.5:
-        #     self.obstaculo_a_frente = True
-        #     self.get_logger().info('Obstáculo detectado a {:.2f}m à frente'.format(min(distancias)))
-        # else:
-        #     self.obstaculo_a_frente = False
 
     def imu_callback(self, msg: Imu):
-        # # Extraindo o quaternion da mensagem
-        # orientation_q = msg.orientation
-        # quat = [
-        #     orientation_q.x,
-        #     orientation_q.y,
-        #     orientation_q.z,
-        #     orientation_q.w
-        # ]
-
-        # # Conversão para Euler usando SciPy
-        # r = R.from_quat(quat)
-        # roll, pitch, yaw = r.as_euler('xyz', degrees=True)
-
-        # # Exibindo resultados
-        # self.get_logger().info('IMU Data Received:')
-        # self.get_logger().info(
-        #     f'Orientation (Euler): Roll={roll:.2f}°, '
-        #     f'Pitch={pitch:.2f}°, Yaw={yaw:.2f}°'
-        # )
-        # self.get_logger().info(
-        #     f'Angular velocity: [{msg.angular_velocity.x:.2f}, '
-        #     f'{msg.angular_velocity.y:.2f}, {msg.angular_velocity.z:.2f}] rad/s'
-        # )
-        # self.get_logger().info(
-        #     f'Linear acceleration: [{msg.linear_acceleration.x:.2f}, '
-        #     f'{msg.linear_acceleration.y:.2f}, {msg.linear_acceleration.z:.2f}] m/s²'
-        # )
+        # IMU está modelada e publicada, mas o FSM usa o yaw do /odom_gt
+        # (ground-truth, sem drift). Mantida assinada para evidenciar o sensor;
+        # no-op por enquanto (fusão roda+IMU seria trabalho de um robô real).
         pass
 
     def odom_callback(self, msg: Odometry):
@@ -614,6 +680,12 @@ class MissionFSM(Node):
         cosy = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
         yaw = math.atan2(siny, cosy)
         self.pose = (p.x, p.y, yaw)
+        # Registra a pose de SPAWN na 1ª msg e congela o waypoint de busca dirigida:
+        # alvo ~15 m em +x (zona azul), agnóstico ao mapa. (start_pose também servirá
+        # de "casa" para o retorno à base no Trab. 2 — registrada aqui, não usada ainda.)
+        if self.start_pose is None:
+            self.start_pose = (p.x, p.y, yaw)
+            self.search_goal = (p.x + self.SEARCH_FORWARD, p.y)
         self.get_logger().info(
             f"pose x={p.x:+.2f} y={p.y:+.2f} yaw={math.degrees(yaw):+.0f}",
             throttle_duration_sec=2.0)
@@ -629,6 +701,7 @@ class MissionFSM(Node):
         # Largura da imagem na primeira frame (para o erro de bearing depois)
         if self.image_width is None:
             self.image_width = label_img.shape[1]
+
 
         # Máscara binária só do label da bandeira-alvo.
         mask = (label_img == self.FLAG_LABEL).astype(np.uint8) * 255

@@ -60,7 +60,9 @@ ros2 launch capture_the_flag carrega_robo.launch.py
 ros2 run capture_the_flag mission_fsm
 ```
 
-O robô nasce em `(0, 0)` virado para `+x`. A bandeira-alvo (`blue_flag`) fica em `x ≈ +8`.
+O robô nasce em `(-8.0, -0.5)` virado para `+x`. A bandeira-alvo (`blue_flag`) fica em
+`(8.0, 0.0)` — cerca de 16 m à frente, ao longo de `+x`. (A `red_flag` fica em `(-8.0, 0.0)`,
+ao lado do ponto de nascimento, e **não** é o alvo.)
 Acompanhe o progresso pelos logs do `mission_fsm` (estado atual, distância, área do blob).
 A missão termina com o log **`BANDEIRA COLETADA! Missao cumprida.`** e o robô parado
 junto à bandeira.
@@ -68,6 +70,30 @@ junto à bandeira.
 ---
 
 ## 4. Arquitetura
+
+**Fluxo de dados.** Os callbacks dos sensores apenas guardam o último dado (`latest_*`);
+toda a decisão acontece no `tick()` (timer 10 Hz), que publica um único `TwistStamped`.
+
+```mermaid
+flowchart LR
+    LIDAR["/scan<br/>(LaserScan)"]
+    CAM["/robot_cam/labels_map<br/>(Image)"]
+    ODOM["/odom_gt<br/>(Odometry)"]
+    IMU["/imu<br/>(Imu)"]
+
+    subgraph NODE["nó mission_fsm — timer 10 Hz"]
+        CB["callbacks de sensores<br/>(guardam latest_*)"]
+        TICK["tick()<br/>fase 1: transições<br/>fase 2: comportamento"]
+        CB --> TICK
+    end
+
+    LIDAR --> CB
+    CAM --> CB
+    ODOM --> CB
+    IMU --> CB
+    TICK -->|"TwistStamped"| CMD["/diff_drive_base_controller/cmd_vel"]
+    CMD --> CTRL["diff_drive_controller<br/>(ros2_control)"]
+```
 
 ### 4.1 Modelagem do robô e sensores (`description/robot.urdf.xacro`)
 
@@ -99,14 +125,41 @@ estado atual; (2) executa o comportamento do estado. Comportamentos e transiçõ
 | `COLLECTING_FLAG` | coleta simbólica: parado ~5 s + log de sucesso |
 | `RETURNING_HOME` | **estado final**: missão concluída, robô parado |
 
-**Fluxo nominal:**
+**Fluxo nominal:** `IDLE → EXPLORING → FLAG_FOUND_CONFIRMATION → GOING_TO_FLAG →
+ADJUSTING_POSITION → COLLECTING_FLAG → RETURNING_HOME (parado)`.
 
-```
-IDLE → EXPLORING → FLAG_FOUND_CONFIRMATION → GOING_TO_FLAG
-     → ADJUSTING_POSITION → COLLECTING_FLAG → RETURNING_HOME (parado)
-```
+**Grafo completo** (descrições por estado em [`fsm-diagram.md`](fsm-diagram.md)):
 
-O diagrama completo com as arestas está em [`../../fsm-diagram.md`](../../fsm-diagram.md).
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
+    IDLE --> EXPLORING : 1º /scan recebido
+
+    EXPLORING --> FLAG_FOUND_CONFIRMATION : bandeira visível
+    EXPLORING --> OBSTACLE_AVOIDANCE : frente bloqueada
+
+    OBSTACLE_AVOIDANCE --> EXPLORING : frente livre (retorno)
+    OBSTACLE_AVOIDANCE --> GOING_TO_FLAG : frente livre (retorno)
+    OBSTACLE_AVOIDANCE --> FLAG_FOUND_CONFIRMATION : escapou + bandeira à vista
+
+    FLAG_FOUND_CONFIRMATION --> GOING_TO_FLAG : confirmada (~2 s)
+    FLAG_FOUND_CONFIRMATION --> EXPLORING : falso-positivo
+
+    GOING_TO_FLAG --> ADJUSTING_POSITION_TO_COLLECT_FLAG : área ≥ AREA_NEAR (chegou)
+    GOING_TO_FLAG --> OBSTACLE_AVOIDANCE : frente bloqueada
+    GOING_TO_FLAG --> REFINDING_FLAG : sem meta estimada
+
+    REFINDING_FLAG --> GOING_TO_FLAG : bandeira reencontrada
+    REFINDING_FLAG --> EXPLORING : timeout (~12 s)
+
+    ADJUSTING_POSITION_TO_COLLECT_FLAG --> COLLECTING_FLAG : orientação ajustada
+    ADJUSTING_POSITION_TO_COLLECT_FLAG --> REFINDING_FLAG : bandeira perdida
+
+    COLLECTING_FLAG --> RETURNING_HOME : bandeira coletada
+    COLLECTING_FLAG --> REFINDING_FLAG : bandeira perdida
+
+    RETURNING_HOME --> [*] : estado final (parado)
+```
 
 ### 4.3 Percepção e meta no frame odom
 
@@ -132,6 +185,14 @@ O diagrama completo com as arestas está em [`../../fsm-diagram.md`](../../fsm-d
   3. **ESCAPE** — anda em **arco** contornando o obstáculo (wall-following emergente).
   Inclui **escape anti-livelock** (relaxa o critério de saída se girar demais, evitando
   ficar preso girando para sempre).
+- **Repulsão lateral (campo potencial, em `GOING_TO_FLAG`):** o arco frontal (±25°) não
+  enxerga cilindros que passam rente ao **flanco/roda**. Como camada reativa *sem trocar de
+  estado*, `_side_repulsion()` varre 25°→110° de cada lado e empurra o comando para **longe
+  do lado mais próximo** + freia, proporcional à proximidade. O limiar de folga **diminui
+  com o ângulo** (`SIDE_CLEAR_FRONT`→`SIDE_CLEAR_SIDE`), aproximando o *footprint inflado*
+  do robô (mais espaço à frente, onde se translada; menos no flanco, onde o corpo já ocupa
+  a folga). Como a meta `flag_goal` é lembrada no frame odom, desviar de raspão não faz
+  perder a bandeira.
 
 ### 4.5 Estrutura do pacote
 
@@ -173,6 +234,8 @@ capture_the_flag/
 | `GOAL_KP_ANG` / `GOAL_KP_LIN` / `GOAL_V_MAX` | ganhos e limite do go-to-point |
 | `ESCAPE_FWD` / `ESCAPE_CURVE` | velocidade e curvatura do arco de contorno (raio = FWD/CURVE) |
 | `ROTATE_SAFE_DIST` / `AVOID_BACK` | folga p/ girar com segurança / velocidade de ré |
+| `SIDE_CLEAR_FRONT` / `SIDE_CLEAR_SIDE` | folga lateral exigida na frente (25°) / no flanco (110°) — *footprint* inflado |
+| `SIDE_KP_ANG` / `SIDE_BRAKE` | ganho do empurrão angular / freio linear da repulsão lateral |
 
 ---
 

@@ -43,15 +43,14 @@
         <model name="${name}">
             <static>false</static>
 
-            <plugin filename="ignition-gazebo-label-system" name="ignition::gazebo::systems::Label">
-                <label>${label}</label>
-            </plugin>
-
             <link name="${name}_link">
                 <pose>${x} ${y} ${z} 0 0 ${rot}</pose>
 
                 <!-- Mastro -->
                 <visual name="pole_visual">
+                    <plugin filename="ignition-gazebo-label-system" name="ignition::gazebo::systems::Label">
+                    <label>${label}</label>
+                    </plugin>
                     <pose>0 0 ${flag_pole_length/2} 0 0 0</pose>
                     <geometry>
                     <cylinder>

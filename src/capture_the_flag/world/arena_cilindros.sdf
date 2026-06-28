@@ -8,13 +8,13 @@
         $ xacro arena_cilindros.sdf.xacro > arena_cilindros.sdf
      -->
   <world name="capture_the_flag_world">
-    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
-    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
-    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
-    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+    <plugin filename="ignition-gazebo-physics-system" name="ignition::gazebo::systems::Physics"/>
+    <plugin filename="ignition-gazebo-user-commands-system" name="ignition::gazebo::systems::UserCommands"/>
+    <plugin filename="ignition-gazebo-scene-broadcaster-system" name="ignition::gazebo::systems::SceneBroadcaster"/>
+    <plugin filename="ignition-gazebo-sensors-system" name="ignition::gazebo::systems::Sensors">
       <render_engine>ogre2</render_engine>
     </plugin>
-    <plugin filename="gz-sim-contact-system" name="gz::sim::systems::Contact">
+    <plugin filename="libignition-gazebo-contact-system.so" name="ignition::gazebo::systems::Contact">
         </plugin>
     <scene>
       <ambient>1.0 1.0 1.0</ambient>
@@ -38,7 +38,7 @@
       <self_collide>0</self_collide>
       <enable_wind>0</enable_wind>
       <kinematic>0</kinematic>
-      <plugin filename="gz-sim-label-system" name="gz::sim::systems::Label">
+      <plugin filename="ignition-gazebo-label-system" name="ignition::gazebo::systems::Label">
         <label>5</label>
       </plugin>
       <link name="ground_plane_link">
@@ -72,7 +72,7 @@
       <enable_wind>0</enable_wind>
       <kinematic>0</kinematic>
       <static>1</static>
-      <plugin filename="gz-sim-label-system" name="gz::sim::systems::Label">
+      <plugin filename="ignition-gazebo-label-system" name="ignition::gazebo::systems::Label">
         <label>10</label>
       </plugin>
       <link name="red_base_link">
@@ -102,7 +102,7 @@
       <self_collide>0</self_collide>
       <enable_wind>0</enable_wind>
       <kinematic>0</kinematic>
-      <plugin filename="gz-sim-label-system" name="gz::sim::systems::Label">
+      <plugin filename="ignition-gazebo-label-system" name="ignition::gazebo::systems::Label">
         <label>15</label>
       </plugin>
       <link name="blue_base_link">
@@ -128,13 +128,13 @@
     </model>
     <model name="red_flag">
       <static>false</static>
-      <plugin filename="gz-sim-label-system" name="gz::sim::systems::Label">
-        <label>20</label>
-      </plugin>
       <link name="red_flag_link">
         <pose>-8.0 0 0.2 0 0 1.5708</pose>
         <!-- Mastro -->
         <visual name="pole_visual">
+          <plugin filename="ignition-gazebo-label-system" name="ignition::gazebo::systems::Label">
+            <label>20</label>
+          </plugin>
           <pose>0 0 0.2 0 0 0</pose>
           <geometry>
             <cylinder>
@@ -213,13 +213,13 @@
     </model>
     <model name="blue_flag">
       <static>false</static>
-      <plugin filename="gz-sim-label-system" name="gz::sim::systems::Label">
-        <label>25</label>
-      </plugin>
       <link name="blue_flag_link">
         <pose>8.0 0 0.2 0 0 1.5708</pose>
         <!-- Mastro -->
         <visual name="pole_visual">
+          <plugin filename="ignition-gazebo-label-system" name="ignition::gazebo::systems::Label">
+            <label>25</label>
+          </plugin>
           <pose>0 0 0.2 0 0 0</pose>
           <geometry>
             <cylinder>
@@ -302,7 +302,7 @@
       <self_collide>0</self_collide>
       <enable_wind>0</enable_wind>
       <kinematic>0</kinematic>
-      <plugin filename="gz-sim-label-system" name="gz::sim::systems::Label">
+      <plugin filename="ignition-gazebo-label-system" name="ignition::gazebo::systems::Label">
         <label>30</label>
       </plugin>
       <link name="center_zone_link">
@@ -335,7 +335,7 @@
       <self_collide>0</self_collide>
       <enable_wind>0</enable_wind>
       <kinematic>0</kinematic>
-      <plugin filename="gz-sim-label-system" name="gz::sim::systems::Label">
+      <plugin filename="ignition-gazebo-label-system" name="ignition::gazebo::systems::Label">
         <label>28</label>
       </plugin>
       <link name="flag_deploy_zone_link">
@@ -364,7 +364,7 @@
     </model>
     <model name="paredes_arena">
       <pose>0 0 0 0 0 0</pose>
-      <plugin filename="gz-sim-label-system" name="gz::sim::systems::Label">
+      <plugin filename="ignition-gazebo-label-system" name="ignition::gazebo::systems::Label">
         <label>35</label>
       </plugin>
       <!-- Parede inferior -->
@@ -473,7 +473,7 @@
       <name>obstaculos_vermelho</name>
       <pose>-9.0 -4.0 0.0 0 0 0</pose>
       <!-- Defefinindo label de obstaculos como 30 -->
-      <plugin filename="gz-sim-label-system" name="gz::sim::systems::Label">
+      <plugin filename="ignition-gazebo-label-system" name="ignition::gazebo::systems::Label">
         <label>30</label>
       </plugin>
     </include>
@@ -482,7 +482,7 @@
       <name>obstaculos_azul</name>
       <pose> 3.0 -4.0 0.0 0 0 0</pose>
       <!-- Defefinindo label de obstaculos como 30 -->
-      <plugin filename="gz-sim-label-system" name="gz::sim::systems::Label">
+      <plugin filename="ignition-gazebo-label-system" name="ignition::gazebo::systems::Label">
         <label>30</label>
       </plugin>
     </include>

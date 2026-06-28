@@ -89,33 +89,6 @@ def generate_launch_description():
         output="screen",
     )
 
-    # Redireciona as mensagens do topico /diff_drive_base_controller/odom para /odom (Conveniencia)
-    relay_odom = Node(
-        name="relay_odom",
-        package="topic_tools",
-        executable="relay",
-        parameters=[
-            {
-                "input_topic": "/diff_drive_base_controller/odom",
-                "output_topic": "/odom",
-            }
-        ],
-        output="screen",
-    )
-
-    # Redireciona as mensagens do topico /cmd_vel para /diff_drive_base_controller/cmd_vel_unstamped (Conveniencia)
-    relay_cmd_vel = Node(
-        name="relay_cmd_vel",
-        package="topic_tools",
-        executable="relay",
-        parameters=[
-            {
-                "input_topic": "/cmd_vel",
-                "output_topic": "/diff_drive_base_controller/cmd_vel_unstamped",
-            }
-        ],
-        output="screen",
-    )
 
     # ------------------------------------------------------
     # RViz: visualização do robô
@@ -147,8 +120,8 @@ def generate_launch_description():
             "-name", "prm_robot",          # Nome da entidade no simulador
             "-topic", "robot_description", # Descrição do robô a ser utilizada
             "-z", "1.0",                   # Altura inicial do robô
-            "-x", "0.0",                  # Posição no eixo X
-            "-y", "0.0",                  # Posição no eixo X
+            "-x", "-8.0",                  # Posição no eixo X
+            "-y", "-0.5",                  # Posição no eixo Y
             "--ros-args", "--log-level", "warn"
         ],
         parameters=[{"use_sim_time": True}],  # Usa o tempo simulado
@@ -241,8 +214,5 @@ def generate_launch_description():
         ),        
         odom_gt,
         robo_mapper,
-        rviz_node,
-  #      relay_odom, # Nodos de redirecionamento de mensagens (Estamos usando apenas odom_gt agora)
-        relay_cmd_vel # Nodos de redirecionamento de mensagens
-  #      controle
+        rviz_node
     ])
