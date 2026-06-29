@@ -329,7 +329,4 @@ capture_the_flag/
   (EKF) de rodas + IMU, com possível drift, e o mapeamento viraria SLAM de fato.
 - **Mapeamento com pose conhecida:** depende do `/odom_gt`; sem pose confiável, o A\* perderia a
   referência do mapa.
-- **Folga apertada em corredores estreitos:** no `arena_paredes` o vão (~1.05 m) deixa pouca
-  margem; o custo de clearance centraliza o caminho, mas a inflação não pode subir muito sem
-  fechar os vãos entre cilindros.
 </content>
