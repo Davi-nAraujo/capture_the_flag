@@ -50,9 +50,8 @@ class MissionFSM(Node):
 
 
     def behavior_exploring(self):
-        # Busca DIRIGIDA: navega para o waypoint na zona azul (onde a bandeira fixa
-        # está), reusando o controlador go-to-point. Enquanto a 1ª msg de odom não
-        # chega (sem pose/waypoint), cai para o avanço reto antigo — sem regressão.
+        # Busca dirigida: segue o caminho A* até o waypoint na zona azul. Sem pose/waypoint
+        # ainda (1ª msg de odom não chegou), cai para o avanço reto.
         if self.pose is None or self.search_goal is None:
             self._publish_cmd(0.9, 0.0)
             return
@@ -60,10 +59,8 @@ class MissionFSM(Node):
 
 
     def behavior_obstacle_avoidance(self):
-        # Desvio em TRÊS fases para escapar de mínimo local (obstáculo entre robô e
-        # meta): (1) BACKUP dá ré se a frente está perto demais para girar com o braço
-        # sem raspar; (2) TURN gira no lugar para o lado escolhido; (3) ESCAPE anda PARA
-        # FRENTE nessa direção, deslocando-se LATERALMENTE ao redor do obstáculo.
+        # Desvio em 3 fases: BACKUP (ré p/ abrir espaço) → TURN (gira no lugar) →
+        # ESCAPE (anda em arco contornando o obstáculo).
         if self.avoid_phase == 'BACKUP':   # dá ré p/ afastar o braço antes de girar
             self._publish_cmd(-self.AVOID_BACK, 0.0)
         elif self.avoid_phase == 'TURN':
@@ -71,8 +68,7 @@ class MissionFSM(Node):
         else:  # ESCAPE: anda em ARCO, curvando de volta ao lado do obstáculo (contorna).
             self._publish_cmd(self.ESCAPE_FWD, -self.avoid_turn_dir * self.ESCAPE_CURVE)
 
-        # Quando estiver carregando a bandeira, continua republicando a pose levantada
-        # para manter o gripper no lugar enquanto desvia.
+        # Carregando a bandeira: mantém o braço levantado durante o desvio.
         if self._is_carrying():
             self._publish_gripper(self.GRIPPER_LIFTED)
 
@@ -82,9 +78,8 @@ class MissionFSM(Node):
 
 
     def behavior_going_to_flag(self):
-        # Navega para a META LEMBRADA da bandeira (frame odom), NÃO para o pixel atual.
-        # Assim, perder a bandeira de vista (ex.: durante um desvio) não nos faz parar:
-        # seguimos para o ponto memorizado; a câmera só refina a meta quando a vê.
+        # Navega para a meta lembrada (frame odom), não para o pixel atual: perder a
+        # bandeira de vista não para o robô; a câmera só refina a meta.
         if self.flag_goal is None:
             self._publish_cmd(0.0, 0.0)   # sem meta ainda; a transição trata (REFINDING)
             return
@@ -96,11 +91,8 @@ class MissionFSM(Node):
 
 
     def behavior_refinding_flag(self):
-        # Gira no lugar para o lado onde a bandeira deve estar. Melhor estimativa de
-        # direção = a META LEMBRADA no frame odom (_flag_side: +1 esq / -1 dir), que
-        # vale qualquer que tenha sido o caminho de entrada no REFINDING. Sem meta/pose
-        # (ou bandeira ~à frente), cai para o último erro de pixel visto (last_flag_err):
-        # err<=0 (esquerda) → CCW(+); err>0 (direita) → CW(-).
+        # Gira no lugar para o lado da bandeira: usa a meta lembrada (_flag_side); sem
+        # meta/pose, cai para o último erro de pixel (last_flag_err).
         side = self._flag_side()
         if side is not None:
             sign = side
@@ -110,9 +102,8 @@ class MissionFSM(Node):
 
 
     def behavior_adjusting_position(self):
-        # Já chegou perto (AREA_NEAR). Agora só GIRA NO LUGAR (linear=0) para deixar
-        # a bandeira centralizada no quadro antes de "coletar". Mesmo erro de bearing
-        # do GOING_TO_FLAG, mas sem avançar — ajuste fino de orientação.
+        # Já perto (AREA_NEAR): gira no lugar (linear=0) para centralizar a bandeira
+        # antes de coletar — ajuste fino de orientação.
         centroid = self.latest_flag_centroid
         if centroid is None or self.image_width is None:
             self._publish_cmd(0.0, 0.0)  # sem alvo; a transição manda p/ REFINDING
@@ -128,17 +119,14 @@ class MissionFSM(Node):
 
 
     def behavior_collecting_flag(self):
-        # Captura em sub-fases. O comportamento ATUA (cmd_vel + garra) conforme a fase;
-        # o avanço/fecho de fase e a saída vivem na transição (divisão comportamento×
-        # transição do FSM). A garra segura a pose → republicar a cada tick é seguro.
+        # Captura em sub-fases (a garra segura a pose → republicar a cada tick é seguro).
+        # O avanço de fase e a saída vivem na transição.
         if self.collect_phase == 'OPEN':
             self._publish_cmd(0.0, 0.0)            # parado enquanto a garra abre
             self._publish_gripper(self.GRIPPER_OPEN)
         elif self.collect_phase == 'CREEP':
             self._publish_gripper(self.GRIPPER_OPEN)   # mantém aberta enquanto avança
-            # Centra no MASTRO via LIDAR (não no centroide da câmera): o centroide do
-            # blob inclui o PAINEL deslocado ~0.16 m do mastro → centrar nele encosta a
-            # garra ao LADO. O feixe LIDAR mais próximo à frente aponta para o mastro.
+            # Centra no MASTRO via LIDAR (não no centroide: o blob inclui o painel deslocado).
             bearing = self._front_min_bearing()
             ang = 0.0 if bearing is None else self.CREEP_KP_ANG * bearing  # +bearing=esq→CCW(+)
             self._publish_cmd(self.CREEP_FWD, ang)
@@ -195,61 +183,41 @@ class MissionFSM(Node):
             f"RETURNING_HOME dist={dist:.2f}", throttle_duration_sec=0.5)
 
 
-    # --- Percepção: helpers de LIDAR ---
-    # LIDAR (via `ros2 topic echo /scan`): angle_min=0, ~1°/raio, range=[0.12, 3.5],
-    # índice 0 = FRENTE. Ranges medidos da origem do sensor (x=0), não da ponta do braço.
+    # --- Percepção: helpers de LIDAR (índice 0 = frente, range 0.12-3.5 m) ---
     FRONT_ARC_HALF = math.radians(25.0)   # meia-largura do arco frontal (rad)
-    # Braço/garra vai até x≈0.40 → folga real na ponta = r − 0.40. Bloqueio com ~0.15 m
-    # de margem na ponta + reação ⇒ r ≤ ~0.65 m (LIDAR).
-    FRONT_BLOCK_DIST = 0.7                # m da origem do LIDAR
-    # PERIGO: mais apertado que "bloqueado". Na fase ESCAPE, se algo fica perigosamente
-    # perto à frente, volta a dar RÉ em vez de girar no lugar (o braço raspa).
-    DANGER_DIST = 0.5                     # m (~0.1 m da ponta do braço)
+    FRONT_BLOCK_DIST = 0.7                # m: frente bloqueada (braço vai até ~0.40 m)
+    DANGER_DIST = 0.5                     # m: perigo, mais apertado que bloqueado
 
-    # OBSTACLE_AVOIDANCE — desvio COMPROMETIDO (anti-chatter), camada subsumption.
-    AVOID_ANGULAR = 0.5                   # rad/s do giro (sentido travado na entrada)
-    # Histerese (Schmitt): entra em FRONT_BLOCK_DIST, mas só sai com folga MAIOR
-    # (CLEAR_DIST). Limiares iguais = vibração na fronteira.
-    CLEAR_DIST = 1.0                      # m: frente livre até aqui p/ sair do desvio
-    AVOID_MIN_TICKS = 10                  # gira ≥1 s antes de cogitar sair (mata chatter)
-    # Anti-livelock: se girou ~6 s sem achar folga LARGA, RELAXA p/ FRONT_BLOCK_DIST —
-    # aceita qualquer saída não-perigosa em vez de girar p/ sempre.
-    AVOID_MAX_TICKS = 60
-    # ESCAPE (anti-mínimo-local): após liberar a frente, anda PARA FRENTE arqueando de
-    # volta ao lado do obstáculo (-avoid_turn_dir) → CONTORNA em arco em vez de orbitar.
-    ESCAPE_FWD = 0.35           # m/s à frente no escape
-    ESCAPE_TICKS = 20           # ~1.5 s ≈ 0.37 m de deslocamento lateral
-    ESCAPE_CURVE = 0.2          # rad/s de curva (menor → arco mais aberto; raio ~0.6 m)
-    # BACKUP: girar no lugar perto de um obstáculo faz o braço (0.4 m) raspar; se a
-    # frente está perto demais p/ girar, dá RÉ primeiro p/ abrir espaço.
-    ROTATE_SAFE_DIST = 0.6      # m: frente livre até aqui = seguro girar
-    AVOID_BACK = 0.15           # m/s de ré no BACKUP
-    BACKUP_MAX_TICKS = 15       # teto de ré (~0.22 m)
+    # OBSTACLE_AVOIDANCE — desvio em 3 fases (BACKUP/TURN/ESCAPE), histerese anti-chatter.
+    AVOID_ANGULAR = 0.5        # rad/s do giro (sentido travado na entrada)
+    CLEAR_DIST = 1.0           # m: folga p/ sair do desvio (> FRONT_BLOCK → histerese)
+    AVOID_MIN_TICKS = 10       # gira ≥1 s antes de sair (anti-chatter)
+    AVOID_MAX_TICKS = 60       # ~6 s girando sem folga larga → relaxa (anti-livelock)
+    ESCAPE_FWD = 0.35          # m/s à frente no escape (contorna em arco)
+    ESCAPE_TICKS = 20          # ~1.5 s ≈ 0.37 m de deslocamento lateral
+    ESCAPE_CURVE = 0.2         # rad/s de curva (menor → arco mais aberto)
+    ROTATE_SAFE_DIST = 0.6     # m: frente livre = seguro girar (senão dá ré antes)
+    AVOID_BACK = 0.15          # m/s de ré no BACKUP
+    BACKUP_MAX_TICKS = 15      # teto de ré (~0.22 m)
 
-    # Confirmação da bandeira: ticks consecutivos visível antes de aceitar (~2 s a
-    # 10 Hz). Conta TICKS (taxa fixa) = tempo real, não frames da câmera.
-    CONFIRM_TICKS = 20
+    CONFIRM_TICKS = 20     # ticks visível consecutivos p/ aceitar a bandeira (~2 s)
 
-    # COLLECTING_FLAG — captura REAL em SUB-FASES (espelha o OBSTACLE_AVOIDANCE):
-    # OPEN (abre parado) → CREEP (avança centralizando no mastro) → CLOSE (fecha/aperta).
+    # COLLECTING_FLAG — captura real em sub-fases: OPEN → CREEP → CLOSE.
     GRIPPER_OPEN = [0.0, -0.06, 0.06]   # [elevação, dir, esq]: pinças abertas ±6 cm
-    GRIPPER_CLOSED = [0.0, 0.0, 0.0]    # fechadas (fenda ~2 cm) → aperta o mastro de 6 cm
-    GRIPPER_LIFTED = [-0.5, 0.0, 0.0]   # braço UP ~28°, fechado, haste acima do LIDAR
-    OPEN_TICKS = 10        # ~1 s p/ as pinças abrirem antes de avançar
-    CREEP_FWD = 0.08       # m/s: avanço lento na aproximação final
-    # PREENSÃO via LIDAR: o mastro cruza o plano do LIDAR (z=0.12); a garra aberta em
-    # ext=0 fica abaixo dele → _front_min_dist lê o mastro limpo. Superfície a ~0.40 m
-    # quando entre as pinças (pontas x≈0.43). TUNAR vendo front_min no log.
-    GRASP_DIST = 0.40      # m: para de avançar e FECHA quando o mastro chega aqui
-    CREEP_MAX_TICKS = 120  # teto de segurança (~0.95 m); o LIDAR encerra o creep antes
-    CLOSE_TICKS = 15       # ~1.5 s p/ o aperto assentar antes de declarar captura
-    CREEP_KP_ANG = 1.5     # rad/s por rad de bearing do mastro (LIDAR) → centra no mastro
+    GRIPPER_CLOSED = [0.0, 0.0, 0.0]    # fechadas → aperta o mastro de 6 cm
+    GRIPPER_LIFTED = [-0.5, 0.0, 0.0]   # braço UP, fechado, haste acima do LIDAR
+    OPEN_TICKS = 10        # ~1 s p/ as pinças abrirem
+    CREEP_FWD = 0.08       # m/s: avanço lento na aproximação
+    GRASP_DIST = 0.40      # m: para e FECHA quando o mastro (LIDAR) chega aqui
+    CREEP_MAX_TICKS = 120  # teto de segurança (~0.95 m)
+    CLOSE_TICKS = 15       # ~1.5 s p/ o aperto assentar
+    CREEP_KP_ANG = 1.5     # rad/s por rad de bearing do mastro → centra no mastro
 
     # RETURNING_HOME — retorno à base carregando a bandeira (corpo ampliado).
     CARRY_BODY_EXTRA = 0.2     # m: o mastro estende a frente; soma-se aos limiares de desvio
-    CARRY_ARM_HALF_DEG = 15.0  # °: zona-morta no centro do LIDAR p/ ignorar a garra carregada
+    CARRY_ARM_HALF_DEG = 20.0  # °: zona-morta no centro do LIDAR p/ ignorar a garra carregada
     CARRY_W_MAX = 0.3          # rad/s: giro máx ao carregar (mais lento)
-    CARRY_V_MAX = 0.20         # m/s: velocidade máx ao carregar (mais cuidado)
+    CARRY_V_MAX = 0.30         # m/s: velocidade máx ao carregar (mais cuidado)
     HOME_REACHED_DIST = 0.5    # m: distância ao spawn p/ declarar "chegou em casa"
     LIFT_TICKS = 15            # ~1.5 s p/ o braço subir antes de dirigir
     DEPOSIT_TICKS = 20         # ~2.0 s parado após abrir a garra (deixa a bandeira assentar)
@@ -269,52 +237,51 @@ class MissionFSM(Node):
     REFIND_ANGULAR = 0.5         # rad/s do giro de busca
     REFIND_TIMEOUT_TICKS = 120   # ~12 s (≈ uma volta) sem achar → desiste p/ EXPLORING
 
-    # --- Busca DIRIGIDA (EXPLORING) ---
-    # Navega a um WAYPOINT na zona azul (+x), onde a bandeira fixa fica em todos os mapas
-    # (o robô spawna na zona vermelha em -x). É avistada a caminho (FOV ~90°) e dispara a
-    # confirmação ANTES do waypoint → o waypoint é só uma DIREÇÃO, derivada do spawn
-    # (agnóstico ao mapa). Se chegar sem avistá-la (oclusão), cai p/ REFINDING.
-    SEARCH_FORWARD = 15.0        # m em +x do spawn → alvo ~x=+7 (centro da zona azul)
-    SEARCH_REACHED_DIST = 1.0    # m: "chegou ao waypoint" (gatilho do fallback)
+    # --- Busca DIRIGIDA (EXPLORING): navega a um waypoint na zona azul (+x) ---
+    # A bandeira é avistada a caminho e confirma antes do waypoint; ele é só uma direção.
+    # Mira a POSIÇÃO real da bandeira (atrás da parede no arena_paredes) p/ o A* rotear ao
+    # redor — mirar o centro da zona parava o robô na parede-fundo.
+    SEARCH_FORWARD = 16.0        # m em +x do spawn → alvo na posição da bandeira
+    SEARCH_REACHED_DIST = 1.0    # m: "chegou ao waypoint" (gatilho do fallback REFINDING)
 
-    # --- Planejamento GLOBAL (mapa de ocupação /grid_map + A*) [Trab. 2] ---
-    # O desvio reativo trava em PAREDES (mínimo local); o A* enxerga o mapa todo e acha
-    # o caminho pela porta. Desconhecido = LIVRE (otimismo) + replanejamento contínuo.
+    # --- Planejamento GLOBAL (/grid_map + A*): desconhecido = LIVRE + replan contínuo ---
     INFLATION_M = 0.30           # m: infla obstáculos pelo raio do corpo (~0.16) + margem.
-    # TETO ~0.33: o gargalo do arena_paredes é o corredor ~1.05 m (ponta da parede-U vs
-    # muro). Folga ≈ 1.05 − 2·INFLATION_M; acima de ~0.35 o corredor fecha p/ o A*.
-    REPLAN_PERIOD = 0.5          # s: replaneja ~2x/s contra o mapa que cresce
-    # Seguidor (carrot/pure-pursuit sobre os cantos do A*): mira no próximo canto além de
-    # WAYPOINT_REACHED. Segmentos entre cantos são livres → dirigir reto até ele é seguro.
-    WAYPOINT_REACHED = 0.3       # m: dentro disto o canto conta como "passado"
+    # TETO ~0.33: o corredor do arena_paredes (~1.05 m) fecha p/ o A* acima disso, e 0.33 já
+    # fechava vãos entre cilindros. Confinamento à arena (abaixo): sem ele o A* rotearia p/ fora
+    # pelo espaço não-mapeado (desconhecido=livre), atravessando as paredes externas.
+    ARENA_FACE_X = 9.05          # m: face interna das paredes leste/oeste (±)
+    ARENA_FACE_Y = 4.05          # m: face interna das paredes norte/sul (±)
+    REPLAN_PERIOD = 0.5         # s: replaneja ~2x/s contra o mapa que cresce
+    # Custo SUAVE de clearance: penaliza (não bloqueia) células perto de obstáculo → o caminho
+    # prefere o miolo do corredor em vez de colar na borda da inflação. Não fecha vãos estreitos.
+    CLEARANCE_PREF_M = 0.35      # m: folga (além da inflação) que o planejador tenta preservar
+    CLEARANCE_W = 0.5           # custo extra por célula de invasão dentro de CLEARANCE_PREF_M
+    # Seguidor carrot/pure-pursuit sobre os cantos do A*.
+    WAYPOINT_REACHED = 0.3      # m: dentro disto o canto conta como "passado"
+    LOOKAHEAD_DIST = 0.3       # m: look-ahead do carrot. Menor = colado ao centro (menos corner-cut).
+    # 0.6 cortava o vão do arena_paredes (carrot caía além da curva, robô mirava na parede e
+    # escapava da arena); 0.3 mantém o carrot no corredor antes de virar.
 
     # --- Navegação por META no frame odom (go-to-point) ---
-    # Ao confirmar a bandeira, congela um PONTO no frame odom e navega até ele. Perder o
-    # pixel (ex.: num desvio) não nos faz parar — a meta fica lembrada.
-    CAM_HFOV = 1.57              # rad: hfov da câmera de segmentação (URDF)
-    DEFAULT_FLAG_RANGE = 2.5     # m: alcance assumido p/ projetar a meta quando o LIDAR não
-                                 # vê a bandeira (>range_max). Só dá DIREÇÃO; refina perto.
+    # Ao confirmar a bandeira, congela um ponto no frame odom e navega até ele (perder o
+    # pixel não para o robô; a meta fica lembrada).
+    CAM_HFOV = 1.57             # rad: hfov da câmera de segmentação (URDF)
+    DEFAULT_FLAG_RANGE = 2.5    # m: alcance assumido quando o LIDAR não vê a bandeira (só direção)
     GOAL_KP_ANG = 1.2           # rad/s por rad de erro de bearing
     GOAL_KP_LIN = 0.5           # m/s por m de erro de distância
     GOAL_V_MAX = 0.35           # m/s máx à frente
     GOAL_W_MAX = 1.0            # rad/s máx de giro
     GOAL_ALIGN_TOL = 0.6        # rad: |bearing| acima disto → só gira, não avança
-    # Anti-deadlock: a chegada é VISUAL (AREA_NEAR); se perdemos o pixel mas alcançamos a
-    # meta lembrada, vai REFINDING (gira p/ reaver) em vez de estacionar parado.
-    GOAL_REACHED_DIST = 0.5     # m: "alcançou a meta lembrada" (sem a bandeira à vista)
+    GOAL_REACHED_DIST = 0.5     # m: alcançou a meta sem ver a bandeira → REFINDING (anti-deadlock)
 
-    # --- Guarda de PROXIMIDADE LATERAL (camada reativa em _drive_to_point) ---
-    # Projeta cada feixe no frame do robô: fwd = r·cosθ, lat = r·sinθ. Dos feixes na faixa
-    # do corpo (fwd ∈ [LAT_BACK, LAT_FRONT]), empurra p/ longe da parede mais próxima ao
-    # lado + freia, sem trocar de estado. Projeção CARTESIANA (não faixas de ângulo fixas)
-    # = robusta a PAREDES FINAS em ângulo rasante (todos os feixes dão ~a mesma |lat|).
-    LAT_BACK = -0.20            # m: limite traseiro da faixa (ignora o que está atrás do eixo)
+    # --- Guarda de PROXIMIDADE LATERAL (reativa, em _drive_to_point) ---
+    # Projeta cada feixe (fwd=r·cosθ, lat=r·sinθ); na faixa do corpo, freia/empurra p/ longe da
+    # parede mais próxima. Projeção cartesiana = robusta a paredes finas em ângulo rasante.
+    LAT_BACK = -0.20           # m: limite traseiro da faixa
     LAT_FRONT = 0.55           # m: limite dianteiro (rodas/flanco + ponta do braço)
-    # Folga exigida PROPOSITALMENTE < meia-largura do corredor (~0.52 m): centrado, ambas
-    # as paredes ficam fora da folga → não trava simétrico; só corrige quando DERIVA.
-    LAT_CLEAR = 0.40           # m: corpo ~0.16 + margem; parede mais perto → repulsão
-    LAT_BAND = 0.18            # m: largura da rampa (clear→repulsão máx) por feixe
-    SIDE_KP_ANG = 1.1           # rad/s de empurrão angular na repulsão máxima
+    LAT_CLEAR = 0.40           # m: parede mais perto → repulsão (< meia-largura do corredor)
+    LAT_BAND = 0.18            # m: largura da rampa clear→repulsão máx
+    SIDE_KP_ANG = 1.1          # rad/s de empurrão angular na repulsão máxima
     SIDE_BRAKE = 0.5            # fração máx de freio linear (não zera o avanço)
 
     # EMERGENCY_DIST — reflexo frontal ao SEGUIR o A* (subordinado ao plano). Hoje é código
@@ -334,16 +301,12 @@ class MissionFSM(Node):
         return False
 
     def _carry_extra(self) -> float:
-        # Extensão EXTRA do corpo quando carregando a bandeira. Soma-se aos limiares
-        # de desvio (FRONT_BLOCK_DIST, DANGER_DIST, CLEAR_DIST, ROTATE_SAFE_DIST) para
-        # que o robô mantenha mais folga com o corpo ampliado, SEM filtrar leituras do
-        # LIDAR — assim não perde de vista obstáculos reais próximos.
+        # Folga extra somada aos limiares de desvio quando carregando (corpo ampliado).
         return self.CARRY_BODY_EXTRA if self._is_carrying() else 0.0
 
     def _carry_dead_zone(self, scan):
-        # Conjunto de índices do LIDAR a IGNORAR quando carregando: ±CARRY_ARM_HALF_DEG ao
-        # redor do índice 0 (frente exata), onde o ponto de montagem do braço levantado cria
-        # uma leitura fantasma. Fora desse cone estreito (~5 feixes), o LIDAR lê normalmente.
+        # Índices do LIDAR a ignorar ao carregar: ±CARRY_ARM_HALF_DEG do centro (frente),
+        # onde o braço levantado cria leitura fantasma.
         arm_k = int(round(math.radians(self.CARRY_ARM_HALF_DEG) / scan.angle_increment))
         n = len(scan.ranges)
         return set(range(0, arm_k + 1)) | set(range(n - arm_k, n))
@@ -375,11 +338,8 @@ class MissionFSM(Node):
         return min(valid)
 
     def _front_min_bearing(self):
-        # Bearing (rad) do feixe de MENOR range no arco frontal (±FRONT_ARC_HALF) =
-        # direção do objeto mais próximo à frente. Na captura (a <1 m do alvo) esse
-        # objeto é o MASTRO → dá o alinhamento lateral correto independentemente da
-        # máscara de segmentação (que pode incluir o painel deslocado). +=esq/CCW,
-        # −=dir/CW. Retorna None se cego (sem scan / só inválidos).
+        # Bearing (rad) do feixe de menor range no arco frontal = direção do objeto mais
+        # próximo (na captura, o mastro). +=esq/CCW, −=dir/CW. None se cego.
         scan = self.latest_scan
         if scan is None:
             return None
@@ -433,11 +393,9 @@ class MissionFSM(Node):
         return left, right
 
     def _side_repulsion(self):
-        # Repulsão lateral por PROJEÇÃO CARTESIANA (robusta a paredes finas). Para cada feixe
-        # válido: fwd = r·cosθ, lat = r·sinθ. Mantém só os que estão na faixa do corpo
-        # (LAT_BACK ≤ fwd ≤ LAT_FRONT). Se |lat| < LAT_CLEAR, gera força ∈ (0,1] que cresce
-        # até 1 dentro de LAT_BAND conforme a parede se aproxima. Retorna a MAIOR força de cada
-        # lado: (s_esq, s_dir). Carregando a bandeira, exige mais folga (corpo ampliado).
+        # Repulsão lateral por projeção cartesiana (robusta a paredes finas). Para cada feixe
+        # na faixa do corpo com |lat| < LAT_CLEAR, gera força ∈ (0,1] que cresce ao aproximar.
+        # Retorna a maior força de cada lado: (s_esq, s_dir).
         scan = self.latest_scan
         if scan is None:
             return 0.0, 0.0
@@ -482,11 +440,8 @@ class MissionFSM(Node):
         return 1.0 if berr > 0 else -1.0
 
     def _choose_turn_dir(self) -> float:
-        # FOCO NA BANDEIRA: contorna o cilindro pelo lado em que a bandeira está, para
-        # reencontrá-la ao rodear — em vez de virar para o lado mais livre, que pode ser
-        # o OPOSTO à bandeira. Sem meta (explorando) → lado mais livre. Segurança: se o
-        # lado da bandeira for bem mais bloqueado (parede), cai p/ o lado mais livre.
-        # Carregando a bandeira (RETURNING_HOME): sem foco na bandeira, lado mais livre.
+        # Contorna pelo lado da bandeira (p/ reencontrá-la ao rodear); sem meta, ou se esse
+        # lado está bem mais bloqueado, vai pelo lado mais livre.
         if self._is_carrying():
             return self._freest_turn_dir()
         side = self._flag_side()
@@ -500,12 +455,10 @@ class MissionFSM(Node):
         return side
 
     def _enter_avoidance(self):
-        # Ponto único de entrada no desvio: registra quem chamou (p/ voltar depois),
-        # zera o relógio de compromisso e TRAVA o sentido do giro (lado mais livre).
+        # Entrada única no desvio: registra quem chamou e zera o relógio de compromisso.
         self.previous_state = self.current_state
         self.avoid_ticks = 0
-        # Perto demais p/ girar com segurança (o braço varre 0.4 m)? Começa dando RÉ;
-        # senão, já começa girando para o lado livre/da bandeira.
+        # Perto demais p/ girar (o braço varre 0.4 m)? Começa dando ré; senão, já gira.
         if self._front_min_dist() < self.ROTATE_SAFE_DIST + self._carry_extra():
             self.avoid_phase = 'BACKUP'
         else:
@@ -564,12 +517,12 @@ class MissionFSM(Node):
         lin = self.GOAL_KP_LIN * dist
         lin *= max(0.0, 1.0 - abs(berr) / self.GOAL_ALIGN_TOL)  # só avança alinhado
 
-        # --- Camada reativa: repulsão LATERAL (campo potencial, footprint inflado) ---
-        # O cone frontal (±25°) não vê cilindros rente ao flanco/roda. Aqui empurramos
-        # para LONGE do lado próximo e freamos, proporcional à força (max dos feixes).
-        # Não troca de estado: a meta lembrada (flag_goal) segue valendo.
+        # Camada reativa: repulsão lateral (o cone frontal não vê o que está rente ao flanco).
         s_left, s_right = self._side_repulsion()
-        ang += self.SIDE_KP_ANG * (s_right - s_left)   # +ang=CCW: foge da esquerda → −
+        # Esterço lateral SÓ no fallback sem caminho: com caminho a direção vem do A* (e o
+        # esterço cancelaria a curva num canto convexo, travando o robô). O FREIO vale sempre.
+        if not self._has_path():
+            ang += self.SIDE_KP_ANG * (s_right - s_left)   # +ang=CCW: foge da esquerda → −
         lin *= 1.0 - self.SIDE_BRAKE * max(s_left, s_right)
 
         w_max = self.CARRY_W_MAX if self._is_carrying() else self.GOAL_W_MAX
@@ -585,38 +538,34 @@ class MissionFSM(Node):
         return len(self.path) >= 2
 
     def _follow_path(self, gx: float, gy: float) -> float:
-        # SEGUIDOR DE CAMINHO (A*): em vez de mirar reto na meta final (que pode estar atrás
-        # de uma parede), mira no PRÓXIMO canto do caminho global. Como _replan() recalcula o
-        # caminho a partir da pose ATUAL ~2x/s, o caminho começa sempre junto ao robô; o
-        # "carrot" é o 1º vértice (a partir do mais próximo) além de WAYPOINT_REACHED. Reusa
-        # _drive_to_point (mesma camada reativa de repulsão lateral). Sem caminho → fallback
-        # go-to-point reto (comportamento antigo, sem regressão). Retorna a distância à META
-        # FINAL (não ao canto), p/ a lógica de chegada dos estados continuar igual.
+        # Seguidor de caminho (A*): mira num carrot sobre o caminho, não na meta final (que
+        # pode estar atrás de uma parede). Sem caminho → fallback go-to-point reto. Retorna a
+        # distância à META FINAL (não ao carrot), p/ a lógica de chegada dos estados.
         if self.pose is None or not self._has_path():
             return self._drive_to_point(gx, gy)
         x, y, _ = self.pose
         dists = [math.hypot(wx - x, wy - y) for (wx, wy) in self.path]
         c = min(range(len(self.path)), key=lambda i: dists[i])   # vértice mais próximo = progresso
-        carrot = self.path[-1]                                   # default: último ponto
-        for i in range(c, len(self.path)):
-            if dists[i] > self.WAYPOINT_REACHED:
-                carrot = self.path[i]                            # 1º canto à frente além do limiar
+        # Carrot de pure-pursuit: ponto sobre o caminho a LOOKAHEAD_DIST de arco à frente do
+        # vértice mais próximo, interpolado no segmento (alvo estável, tangente ao caminho).
+        carrot = self.path[-1]                                   # default: fim do caminho
+        acc = dists[c]                                           # robô → vértice mais próximo
+        for i in range(c, len(self.path) - 1):
+            ax, ay = self.path[i]
+            bx, by = self.path[i + 1]
+            seg = math.hypot(bx - ax, by - ay)
+            if acc + seg >= self.LOOKAHEAD_DIST:
+                t = (self.LOOKAHEAD_DIST - acc) / seg if seg > 1e-6 else 0.0
+                carrot = (ax + t * (bx - ax), ay + t * (by - ay))
                 break
+            acc += seg
         self.last_carrot = carrot   # guarda p/ o gate direcional de _should_avoid (carrot ahead?)
-        self.get_logger().info(  # TEMP DIAG
-            f"FOLLOW pose=({x:.2f},{y:.2f}) c={c}/{len(self.path)} "
-            f"carrot=({carrot[0]:.2f},{carrot[1]:.2f}) dcarrot={math.hypot(carrot[0]-x,carrot[1]-y):.2f} "
-            f"front={self._front_min_dist():.2f} pend=({self.path[-1][0]:.2f},{self.path[-1][1]:.2f})",
-            throttle_duration_sec=1.0)
         self._drive_to_point(*carrot)
         return math.hypot(gx - x, gy - y)
 
     def _should_avoid(self) -> bool:
-        # Gatilho do desvio reativo (SEGURANÇA), SUBORDINADO ao A*: com caminho válido NÃO
-        # desvia — o A* já roteia pelas portas e a guarda LATERAL cuida do raspão sem trocar
-        # de estado. Num corredor o caminho passa legitimamente a ~0.45 m do canto, então um
-        # reflexo frontal giraria o robô p/ fora e entraria em LIVELOCK (o motivo de existir
-        # o A*). Só no fallback SEM caminho vale a regra reativa antiga (perigo OU bloqueio).
+        # Gatilho do desvio reativo, subordinado ao A*: com caminho válido não desvia (o A*
+        # roteia pelas portas; um reflexo frontal aqui causaria livelock). Só vale sem caminho.
         if self._has_path():
             return False
         return self._front_in_danger() or self._front_blocked()
@@ -645,7 +594,7 @@ class MissionFSM(Node):
         cx, _ = centroid
         return abs(self._flag_bearing_error(cx)) < self.CENTER_TOL
 
-    # --- Transições (Fase 1): retornam o próximo State, ou None para "permanecer" ---
+    # --- Transições: retornam o próximo State, ou None para "permanecer" ---
 
     def transition_idle(self):
         # Espera o primeiro LaserScan antes de explorar: sair de IDLE sem dados
@@ -655,9 +604,7 @@ class MissionFSM(Node):
         return None
 
     def transition_exploring(self):
-        # Prioridade subsumption: SEGURANÇA antes do OBJETIVO. Com A* ativo, o desvio
-        # reativo é REDE: dispara em perigo iminente sempre, e no bloqueio largo só sem
-        # caminho (fallback). Seguindo o caminho, o A* roteia pelas portas.
+        # Prioridade subsumption: segurança (desvio) antes do objetivo (bandeira/waypoint).
         if self._should_avoid():
             return self._enter_avoidance()  # trava sentido + relógio de compromisso
         # 2) Bandeira visível? Vai confirmar.
@@ -689,9 +636,8 @@ class MissionFSM(Node):
             # COMPROMISSO: gira pelo menos AVOID_MIN_TICKS (mata chatter, ~30° real).
             if self.avoid_ticks < self.AVOID_MIN_TICKS:
                 return None
-            # HISTERESE: só "libera" com folga LARGA (CLEAR_DIST > FRONT_BLOCK_DIST).
-            # Se girou demais sem achar (beco/canto), RELAXA p/ FRONT_BLOCK_DIST —
-            # anti-livelock (não gira para sempre → não atravessa a parede).
+            # Histerese: libera com folga larga (CLEAR_DIST); se girou demais, relaxa p/
+            # FRONT_BLOCK_DIST (anti-livelock).
             extra = self._carry_extra()
             required = self.CLEAR_DIST + extra
             if self.avoid_ticks >= self.AVOID_MAX_TICKS:
@@ -734,9 +680,8 @@ class MissionFSM(Node):
         if self.flag_goal is None:
             self.refind_ticks = 0
             return self.States.REFINDING_FLAG
-        # 2) Chegou? Arrival VISUAL: o blob da bandeira ficou grande o bastante (perto).
-        #    A bandeira pode não estar no plano do LIDAR, então a ÁREA é o único sinal
-        #    confiável de proximidade. Vence o desvio (chegada antes de bloqueio).
+        # 2) Chegou? Arrival VISUAL (área do blob ≥ AREA_NEAR): a bandeira pode não estar
+        #    no plano do LIDAR, então a área é o sinal de proximidade confiável.
         if (self.latest_flag_centroid is not None
                 and self.latest_flag_area is not None
                 and self.latest_flag_area >= self.AREA_NEAR):
@@ -806,9 +751,8 @@ class MissionFSM(Node):
 
         # CLOSE: COMPROMETIDO — não reprocura mesmo se a garra ocultar a bandeira.
         if self.collect_ticks >= self.CLOSE_TICKS:
-            # Confirmação SEM sensor de contato: a bandeira ainda visível (mastro acima
-            # da garra) sugere captura; sumida sugere que foi derrubada. Sinal fraco,
-            # registrado p/ inspeção no teste (a reforçar depois, ex. teste de empurrão).
+            # Confirmação sem sensor de contato: mastro ainda visível = provável captura
+            # (sinal fraco, só registrado no log).
             confirmed = self.latest_flag_centroid is not None
             self.get_logger().info(
                 "BANDEIRA CAPTURADA (mastro visível). -> RETURNING_HOME" if confirmed
@@ -819,10 +763,8 @@ class MissionFSM(Node):
         return None
 
     def transition_returning_home(self):
-        # Sub-fases: LIFT (levanta braço) → NAVIGATE (dirige p/ home) → DEPOSIT (solta a
-        # bandeira) → DONE (terminal: parado). Antes voltava p/ IDLE, mas o IDLE auto-reinicia
-        # o EXPLORING → o robô re-explorava carregando a bandeira ("enlouquecia"). DONE é
-        # TERMINAL (transição sempre None) → a missão de fato encerra ao chegar e depositar.
+        # Sub-fases: LIFT → NAVIGATE → DEPOSIT → REVERSING → CLOSING → DONE (terminal: parado,
+        # sem re-exploração).
         self.return_ticks += 1
 
         if self.return_phase == 'LIFT':
@@ -905,15 +847,22 @@ class MissionFSM(Node):
         # Células OCUPADAS (==100) infladas pelo raio do robô. Livre(0) e
         # DESCONHECIDO(-1) contam como livres (otimismo → avança e descobre).
         occ = (self.occ_grid == 100)
-        res = self.map_info[0]
+        res, ox, oy, W, H = self.map_info
         rad = max(1, int(math.ceil(self.INFLATION_M / res)))
-        return ndimage.binary_dilation(occ, structure=self._disk(rad))
+        blocked = ndimage.binary_dilation(occ, structure=self._disk(rad))
+        # Confinamento à arena: bloqueia tudo fora das paredes externas (recuado pela inflação),
+        # senão o A* rotearia pelo espaço não-mapeado além das bordas e o robô fugiria da arena.
+        margin = self.INFLATION_M
+        xs = ox + (np.arange(W) + 0.5) * res
+        ys = oy + (np.arange(H) + 0.5) * res
+        blocked[:, (xs < -self.ARENA_FACE_X + margin) | (xs > self.ARENA_FACE_X - margin)] = True
+        blocked[(ys < -self.ARENA_FACE_Y + margin) | (ys > self.ARENA_FACE_Y - margin), :] = True
+        return blocked
 
     @staticmethod
-    def _astar(blocked, start, goal):
-        # A* 8-conexo, heurística euclidiana (admissível p/ 8 vizinhos → ótimo).
-        # blocked: array (H,W) booleano. start/goal: (gx, gy). Devolve [(gx,gy),...]
-        # do start ao goal, ou None se não há caminho.
+    def _astar(blocked, start, goal, cell_cost=None):
+        # A* 8-conexo, heurística euclidiana. blocked: (H,W) bool; start/goal: (gx,gy).
+        # cell_cost (opcional): penalidade aditiva por célula (clearance). None se sem caminho.
         H, W = blocked.shape
         sx, sy = start
         gx, gy = goal
@@ -943,7 +892,7 @@ class MissionFSM(Node):
                 nx, ny = x + dx, y + dy
                 if nx < 0 or nx >= W or ny < 0 or ny >= H or blocked[ny, nx]:
                     continue
-                ng = g + cost
+                ng = g + cost + (cell_cost[ny, nx] if cell_cost is not None else 0.0)
                 if ng < gscore.get((nx, ny), float('inf')):
                     gscore[(nx, ny)] = ng
                     came[(nx, ny)] = (x, y)
@@ -996,15 +945,11 @@ class MissionFSM(Node):
 
     def _replan(self):
         # Recalcula o caminho global robô→meta e publica /plan (RViz). Guarda
-        # self.path (lista de (x,y) no mundo) p/ o seguidor de caminho (Etapa 3).
+        # self.path (lista de (x,y) no mundo) consumida pelo seguidor de caminho (_follow_path).
         if self.occ_grid is None or self.pose is None:
-            self.get_logger().warn(  # TEMP DIAG
-                f"REPLAN bail: occ_grid={self.occ_grid is not None} pose={self.pose is not None}",
-                throttle_duration_sec=1.0)
             return
         goal = self._plan_goal()
         if goal is None:
-            self.get_logger().warn("REPLAN bail: goal=None", throttle_duration_sec=1.0)  # TEMP DIAG
             return
         blocked = self._compute_blocked()
         start = self._nearest_free(blocked, self._world_to_cell(self.pose[0], self.pose[1]))
@@ -1014,18 +959,17 @@ class MissionFSM(Node):
         if start is None or gcell is None:
             self.path = []
             self._publish_plan([])
-            self.get_logger().warn(  # TEMP DIAG
-                f"REPLAN no cell: start={start} gcell={gcell} "
-                f"goalworld=({goal[0]:.1f},{goal[1]:.1f}) occ100={(self.occ_grid==100).sum()}",
-                throttle_duration_sec=1.0)
             return
-        cells = self._astar(blocked, start, gcell)
+        # Custo suave de clearance: distância (em células) de cada célula livre até o obstáculo
+        # inflado mais próximo; penaliza ficar a menos de CLEARANCE_PREF_M da borda → o A* prefere
+        # o miolo do corredor. Como é custo (não bloqueio), nenhum gap estreito fecha.
+        res = self.map_info[0]
+        clear_cells = ndimage.distance_transform_edt(~blocked)
+        pref_cells = self.CLEARANCE_PREF_M / res
+        cell_cost = np.clip(pref_cells - clear_cells, 0.0, None) * self.CLEARANCE_W
+        cells = self._astar(blocked, start, gcell, cell_cost)
         self.path = self._simplify_path(cells) if cells else []
         self._publish_plan(self.path)
-        self.get_logger().info(  # TEMP DIAG
-            f"REPLAN ok: start={start} gcell={gcell} cells={len(cells) if cells else 0} "
-            f"wpts={len(self.path)} occ100={(self.occ_grid==100).sum()}",
-            throttle_duration_sec=1.0)
 
     def _maybe_replan(self):
         now = self.get_clock().now().nanoseconds * 1e-9
@@ -1062,8 +1006,8 @@ class MissionFSM(Node):
             self.States.RETURNING_HOME: self.behavior_returning_home
         }
 
-        # Transições por estado (espelha self.behaviors). Estados sem aresta
-        # ainda não entram aqui; tick() usa .get() e trata ausência como "permanecer".
+        # Transições por estado (espelha self.behaviors). tick() usa .get(), tratando
+        # eventual ausência de transição como "permanecer" no estado atual (defensivo).
         self.transitions = {
             self.States.IDLE: self.transition_idle,
             self.States.EXPLORING: self.transition_exploring,
@@ -1134,9 +1078,7 @@ class MissionFSM(Node):
         self.latest_scan = msg
 
     def imu_callback(self, msg: Imu):
-        # IMU está modelada e publicada, mas o FSM usa o yaw do /odom_gt
-        # (ground-truth, sem drift). Mantida assinada para evidenciar o sensor;
-        # no-op por enquanto (fusão roda+IMU seria trabalho de um robô real).
+        # IMU assinada mas não usada: o FSM usa o yaw do /odom_gt (ground-truth, sem drift).
         pass
 
     def odom_callback(self, msg: Odometry):
@@ -1150,8 +1092,8 @@ class MissionFSM(Node):
         yaw = math.atan2(siny, cosy)
         self.pose = (p.x, p.y, yaw)
         # Registra a pose de SPAWN na 1ª msg e congela o waypoint de busca dirigida:
-        # alvo ~15 m em +x (zona azul), agnóstico ao mapa. (start_pose também servirá
-        # de "casa" para o retorno à base no Trab. 2 — registrada aqui, não usada ainda.)
+        # alvo ~16 m em +x (zona azul), agnóstico ao mapa. (start_pose é também a "casa"
+        # do retorno à base: RETURNING_HOME navega de volta a este ponto e deposita a bandeira.)
         if self.start_pose is None:
             self.start_pose = (p.x, p.y, yaw)
             self.search_goal = (p.x + self.SEARCH_FORWARD, p.y)
@@ -1198,9 +1140,8 @@ class MissionFSM(Node):
         cy = int(M['m01'] / M['m00'])
         self.latest_flag_centroid = (cx, cy)
         self.latest_flag_area = area
-        # Percepção → ESTIMATIVA no mundo: projeta a bandeira como um ponto no frame
-        # odom (a memória que o go-to-point persegue). Sem blob válido, NÃO mexe em
-        # flag_goal — perder o pixel mantém a meta lembrada.
+        # Projeta a bandeira como ponto no frame odom (a meta lembrada). Sem blob válido,
+        # não mexe em flag_goal — perder o pixel mantém a meta.
         self._update_flag_goal(cx)
 
     def tick(self):

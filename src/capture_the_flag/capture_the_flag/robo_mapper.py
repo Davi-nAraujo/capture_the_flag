@@ -6,7 +6,7 @@ from sensor_msgs.msg import LaserScan, Imu, Image
 from nav_msgs.msg import Odometry, OccupancyGrid
 from geometry_msgs.msg import Twist, Pose
 
-from std_msgs.msg import Header
+from std_msgs.msg import Header, Float64MultiArray
 
 from scipy.spatial.transform import Rotation as R
 
@@ -42,6 +42,18 @@ class RoboMapper(Node):
 
     INTEGRATE_PERIOD = 0.2     # s: integra no máximo ~5x/s (suficiente p/ robô lento)
 
+    # Filtro da BANDEIRA CARREGADA: quando o braço está LEVANTADO (pose LIFT, elevação<0), o
+    # mastro cruza o plano do LIDAR à frente e BALANÇA → retornos fantasma, perto e à frente.
+    # Marcá-los como ocupado (L_OCC numa célula nova já cruza OCC_THRESH em 1 frame) faz o A*
+    # replanejar à toa. Ignoramos retornos DENTRO do cone frontal E PERTO (a bandeira fica
+    # colada à garra); obstáculos reais à frente (mais longe) seguem mapeados normalmente.
+    ARM_RAISED_THRESH = -0.1   # elevação (m) abaixo disto = braço levantado (LIFT=-0.5)
+    CARRY_CONE_DEG = 35.0      # meia-largura (°) do cone frontal onde o mastro balança
+    CARRY_NEAR_R = 0.5         # m: só ignora retornos mais perto que isto (a bandeira). A garra
+    # fica ~0.4 m à frente do LIDAR (junta gripper 0.2 m + mastro 0.2 m); a bandeira presa retorna
+    # ~0.4 m e BALANÇA → 0.5 m cobre a garra + folga p/ o balanço. Obstáculo real fica mais longe
+    # (o A* mantém ~0.46 m de folga); se ainda vazar fantasma, suba p/ 0.55–0.6.
+
     def __init__(self):
         super().__init__('robo_mapper')
 
@@ -49,6 +61,9 @@ class RoboMapper(Node):
         self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
         self.create_subscription(Pose, '/model/prm_robot/pose', self.odom_callback, 10)
         self.create_subscription(Image, '/robot_cam/colored_map', self.camera_callback, 10)
+        # Comando da garra (mesma fonte que o FSM publica) → sabe quando o braço está erguido.
+        self.create_subscription(Float64MultiArray, '/gripper_controller/commands',
+                                 self.gripper_callback, 10)
 
         # Utilizado para converter imagens ROS -> OpenCV
         self.bridge = CvBridge()
@@ -62,6 +77,8 @@ class RoboMapper(Node):
         self.heading = 0.0
         self.have_pose = False
         self.last_integrate = 0.0
+        self.arm_raised = False                          # braço erguido → filtra a bandeira
+        self._carry_cone = math.radians(self.CARRY_CONE_DEG)
 
         # Mapa em LOG-ODDS (float). 0 = desconhecido; sobe p/ ocupado, desce p/ livre.
         self.logodds = np.zeros((self.HEIGHT, self.WIDTH), dtype=np.float32)
@@ -102,6 +119,11 @@ class RoboMapper(Node):
         self.heading = R.from_quat([q.x, q.y, q.z, q.w]).as_euler('xyz', degrees=False)[2]
         self.have_pose = True
 
+    def gripper_callback(self, msg: Float64MultiArray):
+        # data = [elevação, DIREITA, ESQUERDA] em m. elevação<0 = braço LEVANTADO (carregando).
+        if msg.data:
+            self.arm_raised = msg.data[0] < self.ARM_RAISED_THRESH
+
     # ------------------------------------------------------------------
     # Integração da varredura LIDAR no mapa (uma vez a cada INTEGRATE_PERIOD).
     # Para cada feixe: traça o raio do robô até o ponto medido marcando as
@@ -136,7 +158,13 @@ class RoboMapper(Node):
                 hit = False        # sem retorno: raio livre até o alcance, sem obstáculo
             if r < msg.range_min:
                 continue
-            ang = th + msg.angle_min + i * msg.angle_increment
+            beam = msg.angle_min + i * msg.angle_increment   # bearing relativo à frente do robô
+            # Filtro da bandeira: braço erguido + retorno PERTO + DENTRO do cone frontal →
+            # é o mastro balançando, não obstáculo. Ignora o feixe (mais longe = obstáculo real).
+            if (self.arm_raised and r < self.CARRY_NEAR_R
+                    and abs(math.atan2(math.sin(beam), math.cos(beam))) <= self._carry_cone):
+                continue
+            ang = th + beam
             ca = math.cos(ang)
             sa = math.sin(ang)
 
