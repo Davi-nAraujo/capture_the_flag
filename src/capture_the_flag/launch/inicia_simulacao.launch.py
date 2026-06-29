@@ -54,6 +54,11 @@ def generate_launch_description():
 #    world_path='/usr/share/ignition/ignition-gazebo6/worlds/heightmap.sdf'
 #    world_path='/usr/share/ignition/ignition-gazebo6/worlds/fuel.sdf'
 #    world_path='/usr/share/ignition/ignition-gazebo6/worlds/actor_crowd.sdf'
+# Alguns teste utilizando cenários já existentes no gazebo
+#    world_path='/usr/share/ignition/ignition-gazebo6/worlds/sensors_demo.sdf'
+#    world_path='/usr/share/ignition/ignition-gazebo6/worlds/heightmap.sdf'
+#    world_path='/usr/share/ignition/ignition-gazebo6/worlds/fuel.sdf'
+#    world_path='/usr/share/ignition/ignition-gazebo6/worlds/actor_crowd.sdf'
 #    world_path='/usr/share/ignition/ignition-gazebo6/worlds/auv_controls.sdf'
 #    world_path='/usr/share/ignition/ignition-gazebo6/worlds/buoyancy.sdf'
 #    world_path='/usr/share/ignition/ignition-gazebo6/worlds/fuel_textured_mesh.sdf'

@@ -53,7 +53,7 @@ class MissionFSM(Node):
         # está), reusando o controlador go-to-point. Enquanto a 1ª msg de odom não
         # chega (sem pose/waypoint), cai para o avanço reto antigo — sem regressão.
         if self.pose is None or self.search_goal is None:
-            self._publish_cmd(0.3, 0.0)
+            self._publish_cmd(0.5, 0.0)
             return
         self._drive_to_point(*self.search_goal)
 
@@ -147,9 +147,7 @@ class MissionFSM(Node):
 
 
     def behavior_returning_home(self):
-        # Voltar para a base é OPCIONAL (Trab. 2). A missão graduável termina na coleta,
-        # então este é o estado FINAL: fica PARADO (missão concluída). Mantido no grafo
-        # do FSM como destino do COLLECTING_FLAG.
+        # Estado FINAL: retorna para home (missão concluída)
         self._publish_cmd(0.0, 0.0)
         self.get_logger().info("Missao concluida. Robo parado.", throttle_duration_sec=5.0)
 
@@ -690,9 +688,9 @@ class MissionFSM(Node):
 
     # RETURNING_HOME não tem transição: é estado FINAL (missão concluída, robô parado).
 
-    # ============================================================
-    # Planejamento GLOBAL: mapa de ocupação (/grid_map) + A*  [Trab. 2]
-    # ============================================================
+    # =======================================================
+    # Planejamento GLOBAL: mapa de ocupação (/grid_map) + A*
+    # =======================================================
 
     def grid_callback(self, msg: OccupancyGrid):
         # Guarda o mapa de ocupação (numpy) + metadados. Inflação e A* rodam no
