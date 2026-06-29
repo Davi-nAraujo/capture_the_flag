@@ -5,6 +5,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import LaserScan, Imu, Image
 from nav_msgs.msg import Odometry, OccupancyGrid, Path
 from geometry_msgs.msg import TwistStamped, PoseStamped
+from std_msgs.msg import Float64MultiArray
 
 
 from cv_bridge import CvBridge
@@ -23,6 +24,14 @@ class MissionFSM(Node):
         msg.twist.linear.x = lx
         msg.twist.angular.z = az
         self.cmd_vel_pub.publish(msg)
+
+    def _publish_gripper(self, data):
+        # Comando à garra: Float64MultiArray [elevação, braço dir, braço esq] em metros.
+        # O controlador (JointGroupPositionController) SEGURA a última pose, então
+        # republicar o mesmo valor a cada tick é idempotente e robusto a perdas de msg.
+        msg = Float64MultiArray()
+        msg.data = list(data)
+        self.gripper_pub.publish(msg)
 
     class States(Enum):
         IDLE = 0
@@ -113,10 +122,28 @@ class MissionFSM(Node):
 
 
     def behavior_collecting_flag(self):
-        # Coleta simbólica (sem garra): fica PARADA junto à bandeira. A contagem
-        # do tempo (e o log de sucesso) vivem na transição — o comportamento só
-        # mantém o robô imóvel, fiel à divisão comportamento×transição do FSM.
-        self._publish_cmd(0.0, 0.0)
+        # Captura em sub-fases. O comportamento ATUA (cmd_vel + garra) conforme a fase;
+        # o avanço/fecho de fase e a saída vivem na transição (divisão comportamento×
+        # transição do FSM). A garra segura a pose → republicar a cada tick é seguro.
+        if self.collect_phase == 'OPEN':
+            self._publish_cmd(0.0, 0.0)            # parado enquanto a garra abre
+            self._publish_gripper(self.GRIPPER_OPEN)
+        elif self.collect_phase == 'CREEP':
+            self._publish_gripper(self.GRIPPER_OPEN)   # mantém aberta enquanto avança
+            # Centra no MASTRO via LIDAR (não no centroide da câmera): o centroide do
+            # blob inclui o PAINEL deslocado ~0.16 m do mastro → centrar nele encosta a
+            # garra ao LADO. O feixe LIDAR mais próximo à frente aponta para o mastro.
+            bearing = self._front_min_bearing()
+            ang = 0.0 if bearing is None else self.CREEP_KP_ANG * bearing  # +bearing=esq→CCW(+)
+            self._publish_cmd(self.CREEP_FWD, ang)
+        else:  # CLOSE
+            self._publish_cmd(0.0, 0.0)            # parado: fecha e deixa o aperto assentar
+            self._publish_gripper(self.GRIPPER_CLOSED)
+        _b = self._front_min_bearing()
+        self.get_logger().info(
+            f"COLLECTING phase={self.collect_phase} front={self._front_min_dist():.2f} "
+            f"bearing={'na' if _b is None else f'{math.degrees(_b):+.0f}'} "
+            f"area={self.latest_flag_area}", throttle_duration_sec=0.5)
 
 
     def behavior_returning_home(self):
@@ -180,10 +207,23 @@ class MissionFSM(Node):
     # variável, o robusto seria medir com get_clock().now().
     CONFIRM_TICKS = 20
 
-    # COLLECTING_FLAG — coleta simbólica: fica parada N ticks junto à bandeira.
-    # A 10 Hz, 50 ticks ≈ 5 s. Contamos TICKS (taxa fixa) pelo mesmo motivo do
-    # CONFIRM_TICKS: mede tempo de verdade enquanto o tick for periódico.
-    COLLECT_TICKS = 50
+    # COLLECTING_FLAG — captura REAL (garra) em SUB-FASES dentro do estado, espelhando
+    # o padrão do OBSTACLE_AVOIDANCE: OPEN (abre a garra parado) → CREEP (avança devagar
+    # centralizando até o mastro entrar entre as pinças) → CLOSE (fecha e aperta). A garra
+    # SEGURA a última pose, então republicamos o comando a cada tick (idempotente).
+    GRIPPER_OPEN = [0.0, -0.06, 0.06]   # [elevação, braço dir, braço esq]: pinças abertas ±6 cm
+    GRIPPER_CLOSED = [0.0, 0.0, 0.0]    # pinças fechadas (fenda ~2 cm) → aperta o mastro de 6 cm
+    OPEN_TICKS = 10        # ~1 s parado p/ as pinças abrirem antes de avançar
+    CREEP_FWD = 0.08       # m/s: avanço lento e controlado na aproximação final
+    # Distância de PREENSÃO (via LIDAR): o mastro (~0.4 m de altura) CRUZA o plano do
+    # LIDAR (z=0.12); a garra aberta em ext=0 fica ABAIXO desse plano, então _front_min_dist
+    # lê o MASTRO limpo. Para o mastro entre as pinças (pontas em x≈0.43, LIDAR em x=0) a
+    # superfície dele fica a ~0.40 m. TUNAR vendo o front_min no log durante o teste.
+    GRASP_DIST = 0.40      # m: para de avançar e FECHA quando o mastro chega a esta distância
+    CREEP_MAX_TICKS = 120  # teto de SEGURANÇA (~0.95 m a 0.08 m/s); o LIDAR (GRASP_DIST)
+                           # deve encerrar o creep ANTES — o teto só evita avançar sem fim
+    CLOSE_TICKS = 15       # ~1.5 s parado p/ o aperto assentar antes de declarar a captura
+    CREEP_KP_ANG = 1.5     # rad/s por rad de bearing do mastro (LIDAR) → centra no mastro
 
     # Servovisão do ajuste fino (ADJUSTING) + percepção da bandeira.
     KP_BEARING = 0.3       # ganho proporcional do erro horizontal (ADJUSTING)
@@ -269,6 +309,29 @@ class MissionFSM(Node):
         if not valid:
             return 0.0  # cego de verdade (tudo NaN) → perigo por segurança
         return min(valid)
+
+    def _front_min_bearing(self):
+        # Bearing (rad) do feixe de MENOR range no arco frontal (±FRONT_ARC_HALF) =
+        # direção do objeto mais próximo à frente. Na captura (a <1 m do alvo) esse
+        # objeto é o MASTRO → dá o alinhamento lateral correto independentemente da
+        # máscara de segmentação (que pode incluir o painel deslocado). +=esq/CCW,
+        # −=dir/CW. Retorna None se cego (sem scan / só inválidos).
+        scan = self.latest_scan
+        if scan is None:
+            return None
+        k = int(round(self.FRONT_ARC_HALF / scan.angle_increment))
+        n = len(scan.ranges)
+        idxs = list(range(0, k + 1)) + list(range(n - k, n))  # frente, embrulhando
+        best_r, best_i = float('inf'), None
+        for i in idxs:
+            r = scan.ranges[i]
+            if math.isnan(r) or r < scan.range_min:
+                continue
+            if r < best_r:
+                best_r, best_i = r, i
+        if best_i is None:
+            return None
+        return self._norm_angle(best_i * scan.angle_increment)  # idx→ângulo, p/ (-π,π]
 
     def _front_blocked(self) -> bool:
         return self._front_min_dist() < self.FRONT_BLOCK_DIST
@@ -581,22 +644,47 @@ class MissionFSM(Node):
             return self.States.REFINDING_FLAG
         # 2) Centralizada dentro da tolerância? Orientação ajustada → coleta.
         if self._flag_centered():
-            self.collect_ticks = 0   # zera o relógio de coleta ao ENTRAR
+            self.collect_ticks = 0          # zera o relógio da sub-fase ao ENTRAR
+            self.collect_phase = 'OPEN'     # captura começa abrindo a garra
             return self.States.COLLECTING_FLAG
         # 3) Ainda torta: continua girando para centralizar.
         return None
 
     def transition_collecting_flag(self):
-        # Rede de segurança (v5): perdeu a bandeira durante a coleta? Reprocura.
-        # Raro — parada, centralizada e perto (área enorme) — mas fiel ao diagrama.
-        if self.latest_flag_centroid is None:
-            self.refind_ticks = 0
-            return self.States.REFINDING_FLAG
-        # Conta o tempo imóvel junto à bandeira. ~5 s a 10 Hz = 50 ticks.
+        # Máquina de sub-fases da captura: OPEN → CREEP → CLOSE → RETURNING_HOME.
         self.collect_ticks += 1
-        if self.collect_ticks >= self.COLLECT_TICKS:
+
+        if self.collect_phase == 'OPEN':
+            # Rede de segurança: perder a bandeira AQUI (ainda não comprometido) → reprocura.
+            if self.latest_flag_centroid is None:
+                self.refind_ticks = 0
+                return self.States.REFINDING_FLAG
+            if self.collect_ticks >= self.OPEN_TICKS:   # garra aberta e assentada
+                self.collect_phase = 'CREEP'
+                self.collect_ticks = 0
+            return None
+
+        if self.collect_phase == 'CREEP':
+            # Ainda não comprometido: perder a bandeira durante o avanço → reprocura.
+            if self.latest_flag_centroid is None:
+                self.refind_ticks = 0
+                return self.States.REFINDING_FLAG
+            # Mastro na distância de preensão (LIDAR) OU teto de creep → FECHA.
+            if (self._front_min_dist() <= self.GRASP_DIST
+                    or self.collect_ticks >= self.CREEP_MAX_TICKS):
+                self.collect_phase = 'CLOSE'
+                self.collect_ticks = 0
+            return None
+
+        # CLOSE: COMPROMETIDO — não reprocura mesmo se a garra ocultar a bandeira.
+        if self.collect_ticks >= self.CLOSE_TICKS:
+            # Confirmação SEM sensor de contato: a bandeira ainda visível (mastro acima
+            # da garra) sugere captura; sumida sugere que foi derrubada. Sinal fraco,
+            # registrado p/ inspeção no teste (a reforçar depois, ex. teste de empurrão).
+            confirmed = self.latest_flag_centroid is not None
             self.get_logger().info(
-                "BANDEIRA COLETADA! Missao cumprida. -> RETURNING_HOME")
+                "BANDEIRA CAPTURADA (mastro visível). -> RETURNING_HOME" if confirmed
+                else "Garra fechada mas mastro SUMIU (captura incerta). -> RETURNING_HOME")
             return self.States.RETURNING_HOME
         return None
 
@@ -802,7 +890,8 @@ class MissionFSM(Node):
         self.flag_seen_consecutive = 0
         self.last_flag_err = 0.0            # último erro de bearing visto (lado da bandeira)
         self.refind_ticks = 0               # ticks girando em REFINDING sem reencontrar
-        self.collect_ticks = 0              # ticks parada coletando a bandeira
+        self.collect_ticks = 0              # ticks na sub-fase atual da captura
+        self.collect_phase = 'OPEN'         # sub-fase da captura: OPEN → CREEP → CLOSE
         self.avoid_ticks = 0                # ticks no desvio atual (compromisso mínimo)
         self.avoid_turn_dir = 1.0           # sentido travado do giro de desvio (+esq/-dir)
         self.avoid_phase = 'TURN'           # fase do desvio: 'TURN' (gira) ou 'ESCAPE' (anda)
@@ -819,6 +908,8 @@ class MissionFSM(Node):
 
         # Publisher para comando de velocidade
         self.cmd_vel_pub = self.create_publisher(TwistStamped, '/diff_drive_base_controller/cmd_vel', 10)
+        # Publisher dos comandos da garra (posição das juntas): [elevação, dir, esq]
+        self.gripper_pub = self.create_publisher(Float64MultiArray, '/gripper_controller/commands', 10)
         # Publisher do caminho planejado (A*) para visualização no RViz
         self.plan_pub = self.create_publisher(Path, '/plan', 10)
 
